@@ -5,7 +5,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import copy
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 import json
+from pathlib import PurePosixPath
 import re
 import time
 from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
@@ -17,7 +19,9 @@ from .diff_engine import (
     CellLocator,
     FlaggedIssue,
     NotebookDiff,
+    NotebookFileDiff,
     ReviewResult,
+    ReviewerGuidanceItem,
     notebook_diff_to_dict,
 )
 
@@ -33,6 +37,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 1_200
 DEFAULT_RETRY_ATTEMPTS = 1
 
 _SEVERITIES = {"low", "medium", "high"}
+_GUIDANCE_PRIORITIES = {"low", "medium", "high"}
 _CATEGORIES = {
     "documentation",
     "output",
@@ -76,6 +81,7 @@ class ProviderConfig:
     max_ai_input_tokens: int = DEFAULT_MAX_AI_INPUT_TOKENS
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     retry_attempts: int = DEFAULT_RETRY_ATTEMPTS
+    base_reviewer_guidance: Tuple[ReviewerGuidanceItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,6 +127,14 @@ class ProviderInterface(ABC):
 class NoneProvider(ProviderInterface):
     """Deterministic local provider used for `ai-provider: none` and fallback paths."""
 
+    def __init__(
+        self,
+        *,
+        base_reviewer_guidance: Sequence[ReviewerGuidanceItem] = (),
+    ) -> None:
+        super().__init__()
+        self.base_reviewer_guidance = tuple(base_reviewer_guidance)
+
     def review(self, diff: NotebookDiff) -> ReviewResult:
         issues = _deterministic_findings(diff)
         self.last_run_metadata = ProviderRunMetadata(
@@ -131,7 +145,11 @@ class NoneProvider(ProviderInterface):
             input_tokens=None,
             output_tokens=None,
         )
-        return ReviewResult(summary=None, flagged_issues=issues)
+        return ReviewResult(
+            summary=None,
+            flagged_issues=issues,
+            reviewer_guidance=list(self.base_reviewer_guidance),
+        )
 
 
 class ClaudeProvider(ProviderInterface):
@@ -150,6 +168,7 @@ class ClaudeProvider(ProviderInterface):
         max_ai_input_tokens: int = DEFAULT_MAX_AI_INPUT_TOKENS,
         max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         retry_attempts: int = DEFAULT_RETRY_ATTEMPTS,
+        base_reviewer_guidance: Sequence[ReviewerGuidanceItem] = (),
         session: Optional[Any] = None,
         fallback_provider: Optional[ProviderInterface] = None,
     ) -> None:
@@ -164,8 +183,11 @@ class ClaudeProvider(ProviderInterface):
         self.max_ai_input_tokens = max_ai_input_tokens
         self.max_output_tokens = max_output_tokens
         self.retry_attempts = max(0, retry_attempts)
+        self.base_reviewer_guidance = tuple(base_reviewer_guidance)
         self.session = session
-        self.fallback_provider = fallback_provider or NoneProvider()
+        self.fallback_provider = fallback_provider or NoneProvider(
+            base_reviewer_guidance=self.base_reviewer_guidance
+        )
 
     def review(self, diff: NotebookDiff) -> ReviewResult:
         if not self.api_key:
@@ -173,6 +195,7 @@ class ClaudeProvider(ProviderInterface):
 
         payload = _prepare_ai_payload(
             diff=diff,
+            base_reviewer_guidance=self.base_reviewer_guidance,
             redact_secrets=self.redact_secrets,
             redact_emails=self.redact_emails,
             max_ai_input_tokens=self.max_ai_input_tokens,
@@ -196,7 +219,14 @@ class ClaudeProvider(ProviderInterface):
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
             )
-            return parsed
+            return ReviewResult(
+                summary=parsed.summary,
+                flagged_issues=parsed.flagged_issues,
+                reviewer_guidance=_merge_reviewer_guidance(
+                    self.base_reviewer_guidance,
+                    parsed.reviewer_guidance,
+                ),
+            )
         except ReviewResultValidationError as exc:
             repair_prompt = _build_repair_prompt(raw_response or "", str(exc))
             try:
@@ -212,7 +242,14 @@ class ClaudeProvider(ProviderInterface):
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
                 )
-                return parsed
+                return ReviewResult(
+                    summary=parsed.summary,
+                    flagged_issues=parsed.flagged_issues,
+                    reviewer_guidance=_merge_reviewer_guidance(
+                        self.base_reviewer_guidance,
+                        parsed.reviewer_guidance,
+                    ),
+                )
             except (ClaudeRequestError, ReviewResultValidationError) as repair_exc:
                 return self._fallback(
                     diff,
@@ -345,13 +382,17 @@ class ClaudeProvider(ProviderInterface):
             input_tokens=input_tokens,
             output_tokens=output_tokens,
         )
-        return ReviewResult(summary=merged_summary, flagged_issues=base.flagged_issues)
+        return ReviewResult(
+            summary=merged_summary,
+            flagged_issues=base.flagged_issues,
+            reviewer_guidance=base.reviewer_guidance,
+        )
 
 
 def build_provider(config: ProviderConfig) -> ProviderInterface:
     """Factory for v0.1.0 provider modes (`none` and `claude`)."""
     if config.ai_provider == "none":
-        return NoneProvider()
+        return NoneProvider(base_reviewer_guidance=config.base_reviewer_guidance)
     if config.ai_provider == "claude":
         return ClaudeProvider(
             api_key=config.ai_api_key,
@@ -364,6 +405,7 @@ def build_provider(config: ProviderConfig) -> ProviderInterface:
             max_ai_input_tokens=config.max_ai_input_tokens,
             max_output_tokens=config.max_output_tokens,
             retry_attempts=config.retry_attempts,
+            base_reviewer_guidance=config.base_reviewer_guidance,
         )
     raise ValueError(f"Unsupported ai-provider for v0.1.0: {config.ai_provider}")
 
@@ -371,7 +413,11 @@ def build_provider(config: ProviderConfig) -> ProviderInterface:
 def parse_strict_review_result(raw_text: str, diff: NotebookDiff) -> ReviewResult:
     """Parse and strictly validate Claude JSON against ReviewResult schema."""
     raw_data = _load_model_json_object(raw_text)
-    _expect_exact_keys(raw_data, {"summary", "flagged_issues"}, context="ReviewResult")
+    _expect_exact_keys(
+        raw_data,
+        {"summary", "flagged_issues", "reviewer_guidance"},
+        context="ReviewResult",
+    )
 
     summary = raw_data["summary"]
     if summary is not None and not isinstance(summary, str):
@@ -388,7 +434,19 @@ def parse_strict_review_result(raw_text: str, diff: NotebookDiff) -> ReviewResul
     for idx, raw_issue in enumerate(flagged_raw):
         flagged_issues.append(_parse_issue(raw_issue, idx, valid_paths))
 
-    return ReviewResult(summary=summary, flagged_issues=flagged_issues)
+    reviewer_guidance_raw = raw_data["reviewer_guidance"]
+    if not isinstance(reviewer_guidance_raw, list):
+        raise ReviewResultValidationError("ReviewResult.reviewer_guidance must be an array")
+
+    reviewer_guidance: List[ReviewerGuidanceItem] = []
+    for idx, raw_item in enumerate(reviewer_guidance_raw):
+        reviewer_guidance.append(_parse_reviewer_guidance_item(raw_item, idx, valid_paths))
+
+    return ReviewResult(
+        summary=summary,
+        flagged_issues=flagged_issues,
+        reviewer_guidance=reviewer_guidance,
+    )
 
 
 def _parse_issue(raw_issue: Any, index: int, valid_paths: Set[str]) -> FlaggedIssue:
@@ -434,7 +492,7 @@ def _parse_issue(raw_issue: Any, index: int, valid_paths: Set[str]) -> FlaggedIs
         raise ReviewResultValidationError(f"flagged_issues[{index}].message must be non-empty")
     message = message.strip()
 
-    locator = _parse_locator(raw_issue["locator"], index)
+    locator = _parse_locator(raw_issue["locator"], context=f"flagged_issues[{index}].locator")
     return FlaggedIssue(
         notebook_path=notebook_path,
         locator=locator,
@@ -446,36 +504,34 @@ def _parse_issue(raw_issue: Any, index: int, valid_paths: Set[str]) -> FlaggedIs
     )
 
 
-def _parse_locator(raw_locator: Any, issue_index: int) -> CellLocator:
+def _parse_locator(raw_locator: Any, *, context: str) -> CellLocator:
     if not isinstance(raw_locator, dict):
-        raise ReviewResultValidationError(f"flagged_issues[{issue_index}].locator must be an object")
+        raise ReviewResultValidationError(f"{context} must be an object")
     _expect_exact_keys(
         raw_locator,
         {"cell_id", "base_index", "head_index", "display_index"},
-        context=f"flagged_issues[{issue_index}].locator",
+        context=context,
     )
 
     cell_id = raw_locator["cell_id"]
     if cell_id is not None and (not isinstance(cell_id, str) or not cell_id.strip()):
-        raise ReviewResultValidationError(
-            f"flagged_issues[{issue_index}].locator.cell_id must be string or null"
-        )
+        raise ReviewResultValidationError(f"{context}.cell_id must be string or null")
     if isinstance(cell_id, str):
         cell_id = cell_id.strip()
 
     base_index = _validate_optional_int(
         raw_locator["base_index"],
-        field=f"flagged_issues[{issue_index}].locator.base_index",
+        field=f"{context}.base_index",
         minimum=0,
     )
     head_index = _validate_optional_int(
         raw_locator["head_index"],
-        field=f"flagged_issues[{issue_index}].locator.head_index",
+        field=f"{context}.head_index",
         minimum=0,
     )
     display_index = _validate_optional_int(
         raw_locator["display_index"],
-        field=f"flagged_issues[{issue_index}].locator.display_index",
+        field=f"{context}.display_index",
         minimum=1,
     )
 
@@ -484,6 +540,85 @@ def _parse_locator(raw_locator: Any, issue_index: int) -> CellLocator:
         base_index=base_index,
         head_index=head_index,
         display_index=display_index,
+    )
+
+
+def _parse_optional_locator(raw_locator: Any, guidance_index: int) -> Optional[CellLocator]:
+    if raw_locator is None:
+        return None
+    return _parse_locator(raw_locator, context=f"reviewer_guidance[{guidance_index}].locator")
+
+
+def _parse_reviewer_guidance_item(
+    raw_item: Any,
+    index: int,
+    valid_paths: Set[str],
+) -> ReviewerGuidanceItem:
+    if not isinstance(raw_item, dict):
+        raise ReviewResultValidationError(f"reviewer_guidance[{index}] must be an object")
+
+    _expect_exact_keys(
+        raw_item,
+        {"notebook_path", "locator", "code", "source", "label", "priority", "message"},
+        context=f"reviewer_guidance[{index}]",
+    )
+
+    notebook_path = raw_item["notebook_path"]
+    if not isinstance(notebook_path, str) or not notebook_path.strip():
+        raise ReviewResultValidationError(
+            f"reviewer_guidance[{index}].notebook_path must be non-empty"
+        )
+    notebook_path = notebook_path.strip()
+    if notebook_path not in valid_paths:
+        raise ReviewResultValidationError(
+            f"reviewer_guidance[{index}].notebook_path is not present in NotebookDiff"
+        )
+
+    code = raw_item["code"]
+    if not isinstance(code, str) or not code.strip():
+        raise ReviewResultValidationError(f"reviewer_guidance[{index}].code must be non-empty")
+    code = code.strip()
+    if not code.startswith("claude:"):
+        raise ReviewResultValidationError(
+            f"reviewer_guidance[{index}].code must start with claude:"
+        )
+
+    source = raw_item["source"]
+    if source != "claude":
+        raise ReviewResultValidationError(
+            f"reviewer_guidance[{index}].source must be claude for Claude responses"
+        )
+
+    label = raw_item["label"]
+    if label is not None and (not isinstance(label, str) or not label.strip()):
+        raise ReviewResultValidationError(
+            f"reviewer_guidance[{index}].label must be string or null"
+        )
+    if isinstance(label, str):
+        label = label.strip()
+
+    priority = raw_item["priority"]
+    if priority not in _GUIDANCE_PRIORITIES:
+        raise ReviewResultValidationError(
+            f"reviewer_guidance[{index}].priority is invalid: {priority}"
+        )
+
+    message = raw_item["message"]
+    if not isinstance(message, str) or not message.strip():
+        raise ReviewResultValidationError(
+            f"reviewer_guidance[{index}].message must be non-empty"
+        )
+    message = message.strip()
+
+    locator = _parse_optional_locator(raw_item["locator"], index)
+    return ReviewerGuidanceItem(
+        notebook_path=notebook_path,
+        locator=locator,
+        code=code,
+        source=source,
+        label=label,
+        priority=priority,
+        message=message,
     )
 
 
@@ -536,11 +671,15 @@ def _expect_exact_keys(raw_dict: Dict[str, Any], expected: Set[str], *, context:
 def _prepare_ai_payload(
     *,
     diff: NotebookDiff,
+    base_reviewer_guidance: Sequence[ReviewerGuidanceItem],
     redact_secrets: bool,
     redact_emails: bool,
     max_ai_input_tokens: int,
 ) -> Dict[str, Any]:
     payload = notebook_diff_to_dict(diff)
+    payload["base_reviewer_guidance"] = [
+        _reviewer_guidance_to_dict(item) for item in base_reviewer_guidance
+    ]
     payload = _redact_json_value(payload, redact_secrets=redact_secrets, redact_emails=redact_emails)
     if _estimate_tokens(payload) <= max_ai_input_tokens:
         return payload
@@ -596,6 +735,7 @@ def _truncate_payload_for_token_budget(
         "notebooks": [],
         "total_notebooks_changed": 0,
         "total_cells_changed": 0,
+        "base_reviewer_guidance": list(payload.get("base_reviewer_guidance", [])),
         "notices": list(payload.get("notices", [])),
     }
     exhausted = False
@@ -686,6 +826,22 @@ def _build_claude_prompt(redacted_payload: Dict[str, Any]) -> str:
                 "message": "string",
             }
         ],
+        "reviewer_guidance": [
+            {
+                "notebook_path": "string",
+                "locator": {
+                    "cell_id": "string|null",
+                    "base_index": "int|null",
+                    "head_index": "int|null",
+                    "display_index": "int|null",
+                },
+                "code": "claude:string",
+                "source": "claude",
+                "label": "string|null",
+                "priority": "low|medium|high",
+                "message": "string",
+            }
+        ],
     }
     payload_json = json.dumps(redacted_payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
     schema_json = json.dumps(schema, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
@@ -699,6 +855,10 @@ def _build_claude_prompt(redacted_payload: Dict[str, Any]) -> str:
         "- Keep findings conservative, objective, and tied to changed cells.\n"
         "- Only reference notebook paths that exist in the payload.\n"
         "- Include flagged_issues only when meaningful.\n"
+        "- base_reviewer_guidance already contains deterministic and playbook guidance.\n"
+        "- reviewer_guidance must contain only NEW Claude-added guidance items.\n"
+        "- Do not repeat, remove, or rewrite any base_reviewer_guidance items.\n"
+        "- Every reviewer_guidance item must use source=claude and code values starting with claude:.\n"
         "- summary may be null when no extra AI summary is useful.\n"
         "Diff payload:\n"
         f"{payload_json}"
@@ -712,7 +872,7 @@ def _build_repair_prompt(previous_response: str, reason: str) -> str:
     return (
         "Your previous response was invalid for strict JSON parsing.\n"
         f"Validation error: {reason}\n"
-        "Return only corrected JSON with keys exactly: summary, flagged_issues.\n"
+        "Return only corrected JSON with keys exactly: summary, flagged_issues, reviewer_guidance.\n"
         "Do not include markdown, fences, explanations, or any extra keys.\n"
         "Previous response:\n"
         f"{prior}"
@@ -848,12 +1008,247 @@ def _deterministic_findings(diff: NotebookDiff) -> List[FlaggedIssue]:
     return issues
 
 
+def build_base_reviewer_guidance(
+    diff: NotebookDiff,
+    reviewer_playbooks: Sequence[Any] = (),
+) -> List[ReviewerGuidanceItem]:
+    """Build deterministic and playbook guidance before provider invocation."""
+    guidance = _deterministic_reviewer_guidance(diff)
+    guidance.extend(_playbook_reviewer_guidance(diff, reviewer_playbooks))
+    return _merge_reviewer_guidance([], guidance)
+
+
+def _deterministic_reviewer_guidance(diff: NotebookDiff) -> List[ReviewerGuidanceItem]:
+    guidance: List[ReviewerGuidanceItem] = []
+    for notebook in diff.notebooks:
+        if notebook.change_type == "deleted":
+            continue
+        guidance.extend(_guidance_for_notebook(notebook))
+    return guidance
+
+
+def _guidance_for_notebook(notebook: NotebookFileDiff) -> List[ReviewerGuidanceItem]:
+    guidance: List[ReviewerGuidanceItem] = []
+    if _notebook_has_introduced_error_outputs(notebook):
+        guidance.append(
+            ReviewerGuidanceItem(
+                notebook_path=notebook.path,
+                locator=None,
+                code="built_in:introduced_error_outputs",
+                source="built_in",
+                label=None,
+                priority="high",
+                message=(
+                    "Review introduced error outputs and confirm the failing state is intentional "
+                    "or resolved before merge."
+                ),
+            )
+        )
+    if _notebook_has_material_output_changes(notebook):
+        guidance.append(
+            ReviewerGuidanceItem(
+                notebook_path=notebook.path,
+                locator=None,
+                code="built_in:material_output_changes",
+                source="built_in",
+                label=None,
+                priority="medium",
+                message=(
+                    "Inspect changed outputs for unexplained metric shifts, stale rendered "
+                    "results, or outputs that now need updated narrative."
+                ),
+            )
+        )
+    if _notebook_has_review_metadata_changes(notebook):
+        guidance.append(
+            ReviewerGuidanceItem(
+                notebook_path=notebook.path,
+                locator=None,
+                code="built_in:review_metadata_changes",
+                source="built_in",
+                label=None,
+                priority="medium",
+                message=(
+                    "Check notebook and cell metadata changes to confirm tags, kernelspec, and "
+                    "environment expectations still match downstream workflows."
+                ),
+            )
+        )
+    if _notebook_has_flow_sensitive_code_changes(notebook):
+        guidance.append(
+            ReviewerGuidanceItem(
+                notebook_path=notebook.path,
+                locator=None,
+                code="built_in:execution_flow_changes",
+                source="built_in",
+                label=None,
+                priority="medium",
+                message=(
+                    "Review moved or deleted code cells for execution-order changes and broken "
+                    "references in the notebook narrative."
+                ),
+            )
+        )
+    return guidance
+
+
+def _playbook_reviewer_guidance(
+    diff: NotebookDiff,
+    reviewer_playbooks: Sequence[Any],
+) -> List[ReviewerGuidanceItem]:
+    guidance: List[ReviewerGuidanceItem] = []
+    for notebook in diff.notebooks:
+        if notebook.change_type == "deleted":
+            continue
+        normalized_path = _normalize_posix_path(notebook.path)
+        for playbook in reviewer_playbooks:
+            if not _playbook_matches_path(playbook, normalized_path):
+                continue
+            playbook_name = str(getattr(playbook, "name", "")).strip()
+            prompts = tuple(getattr(playbook, "prompts", ()) or ())
+            for prompt in prompts:
+                prompt_text = str(prompt).strip()
+                if not prompt_text:
+                    continue
+                guidance.append(
+                    ReviewerGuidanceItem(
+                        notebook_path=notebook.path,
+                        locator=None,
+                        code=f"playbook:{_slugify_code_fragment(playbook_name)}",
+                        source="playbook",
+                        label=playbook_name or None,
+                        priority="medium",
+                        message=prompt_text,
+                    )
+                )
+    return guidance
+
+
+def _playbook_matches_path(playbook: Any, notebook_path: str) -> bool:
+    patterns = tuple(getattr(playbook, "paths", ()) or ())
+    for raw_pattern in patterns:
+        pattern = _normalize_posix_path(str(raw_pattern).strip())
+        for candidate in _playbook_match_patterns(pattern):
+            if fnmatchcase(notebook_path, candidate):
+                return True
+            if PurePosixPath(notebook_path).match(candidate):
+                return True
+    return False
+
+
+def _normalize_posix_path(path: str) -> str:
+    return path.replace("\\", "/").strip("/")
+
+
+def _playbook_match_patterns(pattern: str) -> Tuple[str, ...]:
+    if not pattern:
+        return ()
+    candidates = [pattern]
+    if "/**/" in pattern:
+        candidates.append(pattern.replace("/**/", "/", 1))
+    return tuple(dict.fromkeys(candidates))
+
+
+def _slugify_code_fragment(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return slug or "custom"
+
+
+def _notebook_has_introduced_error_outputs(notebook: NotebookFileDiff) -> bool:
+    for cell in notebook.cell_changes:
+        if cell.change_type == "deleted":
+            continue
+        if any(output.output_type == "error" for output in cell.output_changes):
+            return True
+    return False
+
+
+def _notebook_has_material_output_changes(notebook: NotebookFileDiff) -> bool:
+    for cell in notebook.cell_changes:
+        if cell.change_type == "deleted":
+            continue
+        if not (cell.outputs_changed or cell.change_type == "output_changed"):
+            continue
+        if any(output.output_type == "error" for output in cell.output_changes):
+            continue
+        return True
+    return False
+
+
+def _notebook_has_review_metadata_changes(notebook: NotebookFileDiff) -> bool:
+    if any("notebook material metadata changed" in notice for notice in notebook.notices):
+        return True
+    return any(cell.material_metadata_changed for cell in notebook.cell_changes)
+
+
+def _notebook_has_flow_sensitive_code_changes(notebook: NotebookFileDiff) -> bool:
+    return any(
+        cell.cell_type == "code" and cell.change_type in {"moved", "deleted"}
+        for cell in notebook.cell_changes
+    )
+
+
+def _merge_reviewer_guidance(
+    base_guidance: Sequence[ReviewerGuidanceItem],
+    extra_guidance: Sequence[ReviewerGuidanceItem],
+) -> List[ReviewerGuidanceItem]:
+    combined = list(base_guidance) + list(extra_guidance)
+    deduped: List[Tuple[int, ReviewerGuidanceItem]] = []
+    seen: Set[Tuple[str, str]] = set()
+    for index, item in enumerate(combined):
+        key = (item.notebook_path, _normalize_guidance_message(item.message))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((index, item))
+    deduped.sort(key=lambda pair: _reviewer_guidance_sort_key(pair[1], pair[0]))
+    return [item for _, item in deduped]
+
+
+def _normalize_guidance_message(message: str) -> str:
+    return re.sub(r"\s+", " ", message).strip().lower()
+
+
+def _reviewer_guidance_sort_key(
+    item: ReviewerGuidanceItem,
+    insertion_index: int,
+) -> Tuple[int, int, int]:
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    source_order = {"built_in": 0, "playbook": 1, "claude": 2}
+    return (
+        priority_order.get(item.priority, 99),
+        source_order.get(item.source, 99),
+        insertion_index,
+    )
+
+
+def _reviewer_guidance_to_dict(item: ReviewerGuidanceItem) -> Dict[str, Any]:
+    locator = None
+    if item.locator is not None:
+        locator = {
+            "cell_id": item.locator.cell_id,
+            "base_index": item.locator.base_index,
+            "head_index": item.locator.head_index,
+            "display_index": item.locator.display_index,
+        }
+    return {
+        "notebook_path": item.notebook_path,
+        "locator": locator,
+        "code": item.code,
+        "source": item.source,
+        "label": item.label,
+        "priority": item.priority,
+        "message": item.message,
+    }
+
+
 __all__ = [
     "ClaudeProvider",
     "ProviderConfig",
     "ProviderInterface",
     "ProviderRunMetadata",
     "NoneProvider",
+    "build_base_reviewer_guidance",
     "build_provider",
     "parse_strict_review_result",
 ]

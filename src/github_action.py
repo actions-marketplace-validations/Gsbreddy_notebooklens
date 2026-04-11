@@ -21,6 +21,7 @@ from .claude_integration import (
     ProviderInterface,
     ProviderName,
     ProviderRunMetadata,
+    build_base_reviewer_guidance,
     build_provider,
 )
 from .diff_engine import DiffLimits, NotebookDiff, NotebookInput, ReviewResult, build_notebook_diff
@@ -282,9 +283,14 @@ def run_action(
     )
 
     notebook_diff = build_notebook_diff(notebook_inputs, limits=limits)
+    base_reviewer_guidance = build_base_reviewer_guidance(
+        notebook_diff,
+        parsed_config.reviewer_playbooks if parsed_config is not None else (),
+    )
     provider, requested_provider, selected_provider, provider_notices = _resolve_provider(
         context=pr_context,
         inputs=action_inputs,
+        base_reviewer_guidance=base_reviewer_guidance,
         provider_factory=provider_factory,
     )
 
@@ -619,13 +625,19 @@ def _resolve_provider(
     *,
     context: PullRequestContext,
     inputs: ActionInputs,
+    base_reviewer_guidance: Sequence[Any],
     provider_factory: Callable[[ProviderConfig], ProviderInterface],
 ) -> Tuple[ProviderInterface, ProviderName, ProviderName, List[str]]:
     requested = inputs.ai_provider
     notices: List[str] = []
 
     if requested == "none":
-        return provider_factory(_provider_config(inputs, "none")), requested, "none", notices
+        return (
+            provider_factory(_provider_config(inputs, "none", base_reviewer_guidance)),
+            requested,
+            "none",
+            notices,
+        )
 
     api_key_present = bool((inputs.ai_api_key or "").strip())
     if not api_key_present:
@@ -635,18 +647,28 @@ def _resolve_provider(
             )
         else:
             notices.append("ai-provider=claude requested without ai-api-key; falling back to none mode.")
-        return provider_factory(_provider_config(inputs, "none")), requested, "none", notices
+        return (
+            provider_factory(_provider_config(inputs, "none", base_reviewer_guidance)),
+            requested,
+            "none",
+            notices,
+        )
 
-    provider = provider_factory(_provider_config(inputs, "claude"))
+    provider = provider_factory(_provider_config(inputs, "claude", base_reviewer_guidance))
     return provider, requested, "claude", notices
 
 
-def _provider_config(inputs: ActionInputs, ai_provider: ProviderName) -> ProviderConfig:
+def _provider_config(
+    inputs: ActionInputs,
+    ai_provider: ProviderName,
+    base_reviewer_guidance: Sequence[Any],
+) -> ProviderConfig:
     return ProviderConfig(
         ai_provider=ai_provider,
         ai_api_key=inputs.ai_api_key,
         redact_secrets=inputs.redact_secrets,
         redact_emails=inputs.redact_emails,
+        base_reviewer_guidance=tuple(base_reviewer_guidance),
     )
 
 
