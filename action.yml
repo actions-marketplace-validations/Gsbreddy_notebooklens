@@ -1,6 +1,6 @@
 name: "NotebookLens"
 author: "NotebookLens Contributors"
-description: "AI-powered notebook PR review and triage. Detects .ipynb changes, diffs cells, and posts auto-updating PR comments with optional Claude AI summaries."
+description: "AI-powered notebook PR review, detects .ipynb changes and posts auto-updating PR comments with optional AI summary."
 
 branding:
   icon: "eye"
