@@ -158,6 +158,16 @@ def _modified_notebook_files() -> List[Dict[str, Any]]:
     ]
 
 
+def _reviewer_guidance_training_files() -> List[Dict[str, Any]]:
+    return [
+        {
+            "filename": "notebooks/training/churn_model.ipynb",
+            "status": "modified",
+            "size": 2_048,
+        }
+    ]
+
+
 def _readme_only_files() -> List[Dict[str, Any]]:
     return [
         {
@@ -181,6 +191,14 @@ def _contents_for_medium_notebook() -> Dict[Tuple[str, str], Optional[str]]:
     return {
         (path, "base-sha"): fixture_text("medium_base.ipynb"),
         (path, "head-sha"): fixture_text("medium_head.ipynb"),
+    }
+
+
+def _contents_for_reviewer_guidance_training_notebook() -> Dict[Tuple[str, str], Optional[str]]:
+    path = "notebooks/training/churn_model.ipynb"
+    return {
+        (path, "base-sha"): fixture_text("reviewer_guidance_training_base.ipynb"),
+        (path, "head-sha"): fixture_text("reviewer_guidance_training_head.ipynb"),
     }
 
 
@@ -441,6 +459,65 @@ def test_run_action_fetches_config_from_fork_head_repository_and_sha() -> None:
         ".github/notebooklens.yml",
         "head-sha",
     ) not in api.content_requests
+
+
+def test_training_notebook_fixture_adds_output_guidance_and_playbook_prompts() -> None:
+    api = InMemoryGitHubApiClient(
+        pr_files=_reviewer_guidance_training_files(),
+        contents_by_ref={
+            **_contents_for_reviewer_guidance_training_notebook(),
+            (".github/notebooklens.yml", "head-sha"): (
+                "version: 1\n"
+                "reviewer_guidance:\n"
+                "  playbooks:\n"
+                "    - name: Training notebooks\n"
+                "      paths:\n"
+                "        - notebooks/training/**/*.ipynb\n"
+                "      prompts:\n"
+                "        - Verify the dataset split and random seed changes are intentional.\n"
+                "        - Check whether metric changes are explained in markdown or the PR description.\n"
+            ),
+        },
+    )
+    context = _context(is_fork=False)
+    inputs = ActionInputs(ai_provider="none", ai_api_key=None, redact_secrets=True, redact_emails=True)
+
+    result, sync_result = _run_and_sync(github_api=api, context=context, inputs=inputs)
+
+    assert result.status == "review_ready"
+    assert sync_result.action == "created"
+    assert result.review_result is not None
+    assert [item.notebook_path for item in result.review_result.reviewer_guidance] == [
+        "notebooks/training/churn_model.ipynb",
+        "notebooks/training/churn_model.ipynb",
+        "notebooks/training/churn_model.ipynb",
+    ]
+    assert [item.message for item in result.review_result.reviewer_guidance] == [
+        (
+            "Inspect changed outputs for unexplained metric shifts, stale rendered "
+            "results, or outputs that now need updated narrative."
+        ),
+        "Verify the dataset split and random seed changes are intentional.",
+        "Check whether metric changes are explained in markdown or the PR description.",
+    ]
+    assert [item.source for item in result.review_result.reviewer_guidance] == [
+        "built_in",
+        "playbook",
+        "playbook",
+    ]
+    body = api.comments[0].body
+    assert "#### `notebooks/training/churn_model.ipynb` (`modified`)" in body
+    assert "##### Reviewer Guidance" in body
+    assert (
+        "- Inspect changed outputs for unexplained metric shifts, stale rendered results, "
+        "or outputs that now need updated narrative."
+    ) in body
+    assert (
+        "- Training notebooks: Verify the dataset split and random seed changes are intentional."
+    ) in body
+    assert (
+        "- Training notebooks: Check whether metric changes are explained in markdown or the PR description."
+    ) in body
 
 
 def test_stale_owned_marker_comment_is_deleted_when_notebook_changes_disappear() -> None:
