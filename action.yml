@@ -4,7 +4,7 @@ description: "AI-powered notebook PR review, detects .ipynb changes and posts au
 
 branding:
   icon: "eye"
-  color: "blue"
+  color: "yellow"
 
 inputs:
   ai-provider:
