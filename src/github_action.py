@@ -1,12 +1,8 @@
 """Runtime orchestration for the NotebookLens Docker GitHub Action.
-
-Task 4 scope:
 - pull request event/input handling for Docker action runtime
 - GitHub API notebook discovery/content retrieval without checkout
 - provider selection (`none` | `claude`) with fork-safe fallback behavior
 - deterministic orchestration using existing diff/provider contracts
-
-Out of scope for this module (Task 5 ownership):
 - markdown comment rendering
 - marker comment create/update/delete idempotency
 """
@@ -90,7 +86,7 @@ class ActionRunResult:
 
 
 class GitHubNotebookApiClient(Protocol):
-    """Task 4 boundary for GitHub API access (Task 5 implements concrete client)."""
+    """Boundary for GitHub API access used by the action runtime."""
 
     def list_pull_request_files(self, *, repository: str, pull_number: int) -> Sequence[Any]:
         """Return files changed in the pull request in deterministic API order."""
@@ -185,7 +181,7 @@ def run_action(
     provider_factory: Callable[[ProviderConfig], ProviderInterface] = build_provider,
     emit_logs: bool = True,
 ) -> ActionRunResult:
-    """Run Task 4 orchestration and return structured output for Task 5."""
+    """Run action orchestration and return structured review output."""
     action_inputs = load_action_inputs(env=env) if inputs is None else inputs
     pr_context = (
         load_pull_request_context(env=env, event_payload=event_payload)

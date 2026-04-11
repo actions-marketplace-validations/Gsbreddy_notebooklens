@@ -49,7 +49,7 @@ class CommentSyncResult:
 
 
 class GitHubApiClient:
-    """Concrete GitHub API adapter for Task 4 and Task 5."""
+    """Concrete GitHub API adapter for action runtime and comment sync."""
 
     def __init__(
         self,
@@ -559,7 +559,7 @@ def sync_review_comment(
     notices: Optional[Sequence[str]] = None,
     action_bot_logins: Optional[Sequence[str]] = None,
 ) -> CommentSyncResult:
-    """Apply Task 5 comment contract for a completed action run."""
+    """Apply the PR comment contract for a completed action run."""
     if not has_notebook_changes:
         return github_api.delete_marker_comments(
             repository=repository,

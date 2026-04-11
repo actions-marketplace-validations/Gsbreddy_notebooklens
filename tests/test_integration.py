@@ -220,7 +220,7 @@ class FailingClaudeProvider(ProviderInterface):
         )
 
 
-class Task7ProviderFactory:
+class FailingProviderFactory:
     def __call__(self, config: ProviderConfig) -> ProviderInterface:
         if config.ai_provider == "claude":
             return FailingClaudeProvider()
@@ -284,7 +284,7 @@ def test_provider_failure_falls_back_to_none_with_visible_notice() -> None:
         github_api=api,
         context=context,
         inputs=inputs,
-        provider_factory=Task7ProviderFactory(),
+        provider_factory=FailingProviderFactory(),
     )
 
     assert result.status == "review_ready"

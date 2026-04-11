@@ -95,12 +95,6 @@ If your policy disallows third-party model calls, keep `ai-provider: none`.
 
 See [.github/notebooklens-pr.example.yml](.github/notebooklens-pr.example.yml) for a runnable baseline.
 
-## Project Docs
-
-- [STRATEGY.md](STRATEGY.md)
-- [ROADMAP.md](ROADMAP.md)
-- [CONTRIBUTING.md](CONTRIBUTING.md)
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
