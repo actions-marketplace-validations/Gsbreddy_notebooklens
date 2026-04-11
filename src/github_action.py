@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Protocol, Sequence, Tuple
+import yaml
 
 from .claude_integration import (
     ProviderConfig,
@@ -43,6 +44,19 @@ class PullRequestContext:
     is_fork: bool
     event_name: str
     event_action: str
+
+
+@dataclass(frozen=True)
+class ReviewerPlaybookConfig:
+    name: str
+    paths: Tuple[str, ...]
+    prompts: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class NotebookLensConfig:
+    version: int
+    reviewer_playbooks: Tuple[ReviewerPlaybookConfig, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -87,6 +101,7 @@ class ActionRunResult:
     notices: List[str]
     metadata: ActionRunMetadata
     config_content: Optional[str]
+    config: Optional[NotebookLensConfig]
     config_notices: List[str] = field(default_factory=list)
 
 
@@ -216,6 +231,7 @@ def run_action(
             notices=[reason],
             metadata=_metadata_for_skip(action_inputs),
             config_content=None,
+            config=None,
             config_notices=[],
         )
         if emit_logs:
@@ -226,6 +242,8 @@ def run_action(
         github_api=github_api,
         context=pr_context,
     )
+    parsed_config, parse_notices = _parse_notebooklens_config(config_content)
+    config_notices.extend(parse_notices)
 
     raw_files = github_api.list_pull_request_files(
         repository=pr_context.repository,
@@ -249,6 +267,7 @@ def run_action(
             notices=notices,
             metadata=_metadata_for_skip(action_inputs),
             config_content=config_content,
+            config=parsed_config,
             config_notices=list(config_notices),
         )
         if emit_logs:
@@ -314,6 +333,7 @@ def run_action(
         notices=list(notebook_diff.notices),
         metadata=metadata,
         config_content=config_content,
+        config=parsed_config,
         config_notices=list(config_notices),
     )
     if emit_logs:
@@ -465,6 +485,120 @@ def _fetch_notebooklens_config(
     if notice is not None:
         notices.append(f"{CONFIG_FILE_PATH}: {notice}")
     return content, notices
+
+
+def _parse_notebooklens_config(
+    content: Optional[str],
+) -> Tuple[Optional[NotebookLensConfig], List[str]]:
+    if content is None:
+        return None, []
+
+    try:
+        raw_config = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        return None, [_invalid_config_notice(f"invalid YAML ({_truncate_reason(exc)})")]
+
+    try:
+        return _validate_notebooklens_config(raw_config), []
+    except ValueError as exc:
+        return None, [_invalid_config_notice(str(exc))]
+
+
+def _validate_notebooklens_config(raw_config: Any) -> NotebookLensConfig:
+    if not isinstance(raw_config, Mapping):
+        raise ValueError("expected a top-level YAML mapping")
+
+    version = raw_config.get("version")
+    if version != 1:
+        raise ValueError("version must be set to 1")
+
+    reviewer_guidance_raw = raw_config.get("reviewer_guidance")
+    if reviewer_guidance_raw is None:
+        return NotebookLensConfig(version=1)
+    if not isinstance(reviewer_guidance_raw, Mapping):
+        raise ValueError("reviewer_guidance must be a mapping when present")
+
+    playbooks_raw = reviewer_guidance_raw.get("playbooks")
+    if playbooks_raw is None:
+        return NotebookLensConfig(version=1)
+    if not isinstance(playbooks_raw, list):
+        raise ValueError("reviewer_guidance.playbooks must be a list")
+
+    reviewer_playbooks = tuple(
+        _normalize_reviewer_playbook(item, index=index)
+        for index, item in enumerate(playbooks_raw)
+    )
+    return NotebookLensConfig(version=1, reviewer_playbooks=reviewer_playbooks)
+
+
+def _normalize_reviewer_playbook(raw_playbook: Any, *, index: int) -> ReviewerPlaybookConfig:
+    if not isinstance(raw_playbook, Mapping):
+        raise ValueError(f"reviewer_guidance.playbooks[{index}] must be a mapping")
+
+    name = _normalize_required_string(
+        raw_playbook.get("name"),
+        field_name=f"reviewer_guidance.playbooks[{index}].name",
+    )
+    paths = _normalize_string_list(
+        raw_playbook.get("paths"),
+        field_name=f"reviewer_guidance.playbooks[{index}].paths",
+        normalizer=_normalize_playbook_path,
+    )
+    prompts = _normalize_string_list(
+        raw_playbook.get("prompts"),
+        field_name=f"reviewer_guidance.playbooks[{index}].prompts",
+    )
+    return ReviewerPlaybookConfig(name=name, paths=paths, prompts=prompts)
+
+
+def _normalize_required_string(value: Any, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a non-empty string")
+    normalized = " ".join(value.strip().split())
+    if not normalized:
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return normalized
+
+
+def _normalize_string_list(
+    value: Any,
+    *,
+    field_name: str,
+    normalizer: Optional[Callable[[str], str]] = None,
+) -> Tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a non-empty list of strings")
+
+    seen: Dict[str, None] = {}
+    normalized_items: List[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{field_name} must contain only non-empty strings")
+        normalized = item.strip()
+        if normalizer is not None:
+            normalized = normalizer(normalized)
+        if not normalized:
+            raise ValueError(f"{field_name} must contain only non-empty strings")
+        if normalized in seen:
+            continue
+        seen[normalized] = None
+        normalized_items.append(normalized)
+
+    if not normalized_items:
+        raise ValueError(f"{field_name} must be a non-empty list of strings")
+
+    return tuple(normalized_items)
+
+
+def _normalize_playbook_path(value: str) -> str:
+    return value.replace("\\", "/")
+
+
+def _invalid_config_notice(reason: str) -> str:
+    return (
+        f"Ignored reviewer guidance playbooks from {CONFIG_FILE_PATH}: {reason}. "
+        "Continuing with built-in guidance only."
+    )
 
 
 def _safe_fetch_file_content(
@@ -790,8 +924,10 @@ __all__ = [
     "ActionRunMetadata",
     "ActionRunResult",
     "GitHubNotebookApiClient",
+    "NotebookLensConfig",
     "PullRequestContext",
     "PullRequestFile",
+    "ReviewerPlaybookConfig",
     "load_action_inputs",
     "load_pull_request_context",
     "log_run_result",
