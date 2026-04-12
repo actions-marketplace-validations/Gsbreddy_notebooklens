@@ -1,4 +1,4 @@
-"""GitHub API adapter and PR comment idempotency for NotebookLens v0.1.0."""
+"""GitHub API adapter and PR comment idempotency for NotebookLens v0.2.0."""
 
 from __future__ import annotations
 
@@ -487,7 +487,7 @@ class GitHubApiClient:
         headers = {
             "Accept": accept,
             "X-GitHub-Api-Version": self.api_version,
-            "User-Agent": "notebooklens-action/0.1.0",
+            "User-Agent": "notebooklens-action/0.2.0",
         }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"

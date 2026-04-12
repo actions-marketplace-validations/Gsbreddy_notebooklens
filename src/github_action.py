@@ -130,7 +130,7 @@ def load_action_inputs(env: Optional[Mapping[str, str]] = None) -> ActionInputs:
 
     ai_provider_raw = (_read_action_input(env_map, "ai-provider") or "none").strip().lower()
     if ai_provider_raw not in {"none", "claude"}:
-        raise ValueError(f"Unsupported ai-provider for v0.1.0: {ai_provider_raw}")
+        raise ValueError(f"Unsupported ai-provider for v0.2.0: {ai_provider_raw}")
 
     ai_api_key = (_read_action_input(env_map, "ai-api-key") or "").strip() or None
     redact_secrets = _parse_bool(_read_action_input(env_map, "redact-secrets"), default=True)

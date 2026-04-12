@@ -33,7 +33,7 @@ jobs:
           redact-emails: true
 ```
 
-**Note:** `Gsbreddy/notebooklens@v0` references the published action. Use `@v0` to track the latest v0.x release, or pin to a specific tag like `@v0.1.0`. See the [Releases](https://github.com/Gsbreddy/notebooklens/releases) page for available tags.
+**Note:** `Gsbreddy/notebooklens@v0` references the published action. Use `@v0` to track the latest v0.x release, or pin to a specific tag like `@v0.2.0`. See the [Releases](https://github.com/Gsbreddy/notebooklens/releases) page for available tags.
 
 `GITHUB_TOKEN` is the built-in Actions token used to read PR file metadata and create or update the review comment. No extra setup is required — GitHub provides it automatically in every workflow run.
 
@@ -151,7 +151,7 @@ Give the action step an `id` such as `id: notebooklens` if you want to read outp
     echo "Changed notebooks: ${{ steps.notebooklens.outputs.changed-notebooks }}"
 ```
 
-**Out of scope for v0.1.0:** OpenAI/Ollama providers, GitLab/Bitbucket, hosted review UI, inline notebook threads.
+**Out of scope for v0.2.0:** OpenAI/Ollama providers, GitLab/Bitbucket, hosted review UI, inline notebook threads.
 
 ## Reviewer Guidance Playbooks
 

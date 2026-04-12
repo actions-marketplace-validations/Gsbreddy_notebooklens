@@ -53,7 +53,7 @@ git diff --check
 
 1. Merge the release-ready branch into `main`.
 2. Open the Actions tab and run the `Release` workflow on `main`.
-3. Provide a version input in `0.x.y` form, for example `0.1.0`.
+3. Provide a version input in `0.x.y` form, for example `0.2.0`.
 4. Verify:
    - tag `v0.x.y` exists
    - floating tag `v0` points to the same commit

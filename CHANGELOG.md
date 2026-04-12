@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-12
+
 ### Added
 
 - Reviewer guidance playbooks via optional `.github/notebooklens.yml`, merged into notebook-local PR comment guidance sections.
