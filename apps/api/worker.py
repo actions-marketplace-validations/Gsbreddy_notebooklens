@@ -17,7 +17,11 @@ from .notification_delivery import (
     build_notification_email_client,
     deliver_pending_notifications,
 )
-from .orchestration import SnapshotBuildResult, run_snapshot_build_worker_once
+from .orchestration import (
+    LiteLLMGatewayClient,
+    SnapshotBuildResult,
+    run_snapshot_build_worker_once,
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,7 @@ def process_snapshot_build_job_once(
     *,
     settings: ApiSettings | None = None,
     github_client: ManagedGitHubClient | None = None,
+    litellm_client: LiteLLMGatewayClient | None = None,
 ) -> SnapshotBuildResult:
     """Claim and process one managed snapshot build job."""
     resolved_settings = settings or get_settings()
@@ -74,6 +79,7 @@ def process_snapshot_build_job_once(
             settings=resolved_settings,
             db_session=db_session,
             github_client=resolved_github_client,
+            litellm_client=litellm_client,
         )
 
 

@@ -21,6 +21,7 @@ def enqueue_snapshot_build_job(
     managed_review_id,
     base_sha: str,
     head_sha: str,
+    force_rebuild: bool = False,
     scheduled_at: datetime | None = None,
 ) -> SnapshotBuildJob:
     """Create a queued snapshot build job."""
@@ -28,6 +29,7 @@ def enqueue_snapshot_build_job(
         managed_review_id=managed_review_id,
         base_sha=base_sha,
         head_sha=head_sha,
+        force_rebuild=force_rebuild,
         status=SnapshotBuildJobStatus.QUEUED,
         attempt_count=0,
         scheduled_at=scheduled_at or utcnow(),

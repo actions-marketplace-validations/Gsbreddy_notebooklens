@@ -25,7 +25,7 @@ from .models import (
     ThreadMessage,
     UserSession,
 )
-from .oauth import GitHubOAuthClient, OAuthSessionStore
+from .oauth import GitHubOAuthClient, OAuthSessionStore, SessionCipherError
 
 
 VALID_THREAD_BLOCK_KINDS: tuple[SnapshotBlockKind, ...] = ("source", "outputs", "metadata")
@@ -50,6 +50,17 @@ class ThreadCounts:
     unresolved: int = 0
     resolved: int = 0
     outdated: int = 0
+
+
+@dataclass(frozen=True)
+class MirrorAuthContext:
+    """Resolved GitHub authorship context for future mirror writes."""
+
+    mode: str
+    access_token: str | None
+    github_user_id: int
+    github_login: str | None
+    fallback_reason: str | None = None
 
 
 def _touch_review(review: ManagedReview) -> None:
@@ -684,6 +695,56 @@ def _resolve_known_email(
     return email.strip()
 
 
+def resolve_mirror_auth_context(
+    *,
+    db_session: Session,
+    github_user_id: int,
+    session_store: OAuthSessionStore,
+    now: datetime | None = None,
+) -> MirrorAuthContext:
+    current_time = now or datetime.now(timezone.utc)
+    session_candidates = db_session.execute(
+        select(UserSession)
+        .where(UserSession.github_user_id == github_user_id)
+        .order_by(UserSession.created_at.desc())
+    ).scalars().all()
+    session_record = next(
+        (
+            item
+            for item in session_candidates
+            if _ensure_utc(item.expires_at) >= current_time
+        ),
+        None,
+    )
+    if session_record is None:
+        return MirrorAuthContext(
+            mode="app",
+            access_token=None,
+            github_user_id=github_user_id,
+            github_login=None,
+            fallback_reason="user_token_unavailable",
+        )
+
+    try:
+        access_token = session_store.cipher.decrypt(session_record.access_token_encrypted)
+    except SessionCipherError:
+        return MirrorAuthContext(
+            mode="app",
+            access_token=None,
+            github_user_id=github_user_id,
+            github_login=session_record.github_login,
+            fallback_reason="user_token_unreadable",
+        )
+
+    return MirrorAuthContext(
+        mode="user",
+        access_token=access_token,
+        github_user_id=github_user_id,
+        github_login=session_record.github_login,
+        fallback_reason=None,
+    )
+
+
 def _select_snapshot(
     *,
     review: ManagedReview,
@@ -801,6 +862,7 @@ def _ensure_utc(value: datetime) -> datetime:
 
 
 __all__ = [
+    "MirrorAuthContext",
     "ReviewWorkspaceError",
     "ReviewWorkspaceNotFoundError",
     "ReviewWorkspaceValidationError",
@@ -817,6 +879,7 @@ __all__ = [
     "load_thread_by_id",
     "normalize_thread_anchor",
     "reopen_thread",
+    "resolve_mirror_auth_context",
     "resolve_thread",
     "serialize_thread",
     "snapshot_contains_anchor",

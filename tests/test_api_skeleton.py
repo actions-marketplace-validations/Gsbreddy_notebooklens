@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+import uuid
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -58,8 +59,8 @@ from apps.api.oauth import (
     STATE_COOKIE_NAME,
     SessionTokenCipher,
 )
-from apps.api.orchestration import run_snapshot_build_worker_once
-from apps.api.review_workspace import get_workspace_payload
+from apps.api.orchestration import LiteLLMGatewayResponse, run_snapshot_build_worker_once
+from apps.api.review_workspace import get_workspace_payload, resolve_mirror_auth_context
 from apps.api.routes.auth import get_oauth_client
 from apps.api.routes.github import get_managed_github_client
 from apps.api.routes.repo_access import reset_repo_access_cache
@@ -240,6 +241,40 @@ class FakeLiteLLMConnectionTester:
         if self.should_fail:
             raise RuntimeError("boom")
         return "/chat/completions" if not kwargs["use_responses_api"] else "/responses"
+
+
+class FakeLiteLLMGatewayClient:
+    def __init__(
+        self,
+        *,
+        responses: list[str] | None = None,
+        error: str | None = None,
+    ) -> None:
+        self.responses = list(responses or [])
+        self.error = error
+        self.calls: list[dict[str, Any]] = []
+
+    def complete(self, **kwargs: Any) -> LiteLLMGatewayResponse:
+        config = kwargs["config"]
+        self.calls.append(
+            {
+                "base_url": config.base_url,
+                "model_name": config.model_name,
+                "use_responses_api": config.use_responses_api,
+                "api_key": kwargs["api_key"],
+                "static_headers": dict(kwargs["static_headers"]),
+                "prompt": kwargs["prompt"],
+            }
+        )
+        if self.error is not None:
+            raise RuntimeError(self.error)
+        if not self.responses:
+            raise RuntimeError("No fake LiteLLM response configured")
+        return LiteLLMGatewayResponse(
+            text=self.responses.pop(0),
+            input_tokens=123,
+            output_tokens=45,
+        )
 
 
 def _env(database_url: str) -> dict[str, str]:
@@ -617,6 +652,106 @@ def create_github_installation_fixture(
         return str(installation.id)
 
 
+def create_managed_ai_gateway_fixture(
+    settings: ApiSettings,
+    *,
+    installation_id: str,
+    active: bool = True,
+    use_responses_api: bool = False,
+) -> str:
+    cipher = SessionTokenCipher(settings.encryption_key)
+    with session_scope(settings) as db_session:
+        config = ManagedAiGatewayConfig(
+            installation_id=uuid.UUID(installation_id),
+            provider_kind=ManagedAiGatewayProviderKind.LITELLM,
+            display_name="Internal LiteLLM",
+            github_host_kind=GitHubHostKind.GITHUB_COM,
+            github_api_base_url="https://api.github.com",
+            github_web_base_url="https://github.com",
+            base_url="https://litellm.internal.example/v1",
+            model_name="gpt-4.1",
+            api_key_encrypted=cipher.encrypt("Bearer managed-secret"),
+            api_key_header_name="Authorization",
+            static_headers_encrypted_json=cipher.encrypt(
+                json.dumps({"x-tenant-token": "tenant-secret"})
+            ),
+            use_responses_api=use_responses_api,
+            litellm_virtual_key_id="vk-123",
+            active=active,
+            updated_by_github_user_id=101,
+        )
+        db_session.add(config)
+        db_session.flush()
+        return str(config.id)
+
+
+def create_ready_review_fixture(
+    settings: ApiSettings,
+    *,
+    account_login: str = "octo-org",
+    account_type: InstallationAccountType = InstallationAccountType.ORGANIZATION,
+    owner: str = "octo-org",
+    repo: str = "notebooklens",
+    pull_number: int = 7,
+    base_sha: str = "base-sha",
+    head_sha: str = "head-sha",
+) -> tuple[str, str]:
+    with session_scope(settings) as db_session:
+        installation = GitHubInstallation(
+            github_installation_id=11,
+            account_login=account_login,
+            account_type=account_type,
+        )
+        db_session.add(installation)
+        db_session.flush()
+
+        repository = InstallationRepository(
+            installation_id=installation.id,
+            owner=owner,
+            name=repo,
+            full_name=f"{owner}/{repo}",
+            private=True,
+            active=True,
+        )
+        db_session.add(repository)
+        db_session.flush()
+
+        review = ManagedReview(
+            installation_repository_id=repository.id,
+            owner=owner,
+            repo=repo,
+            pull_number=pull_number,
+            base_branch="main",
+            latest_base_sha=base_sha,
+            latest_head_sha=head_sha,
+            status=ManagedReviewStatus.READY,
+        )
+        db_session.add(review)
+        db_session.flush()
+
+        snapshot = ReviewSnapshot(
+            managed_review_id=review.id,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            snapshot_index=1,
+            status=ReviewSnapshotStatus.READY,
+            schema_version=1,
+            summary_text="Existing snapshot",
+            flagged_findings_json=[],
+            reviewer_guidance_json=[],
+            snapshot_payload_json={"schema_version": 1, "review": {"notices": [], "notebooks": []}},
+            notebook_count=1,
+            changed_cell_count=1,
+            failure_reason=None,
+        )
+        db_session.add(snapshot)
+        db_session.flush()
+
+        review.latest_snapshot_id = snapshot.id
+        db_session.flush()
+        return str(review.id), str(installation.id)
+
+
 def test_api_settings_load_and_normalize_private_key(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     assert settings.snapshot_retention_days == 90
@@ -823,6 +958,9 @@ def test_managed_api_metadata_and_migration_scaffold_exist() -> None:
     ).exists()
     assert Path(
         "apps/api/alembic/versions/20260412_0004_add_managed_ai_gateway_configs.py"
+    ).exists()
+    assert Path(
+        "apps/api/alembic/versions/20260412_0005_add_force_rebuild_to_snapshot_jobs.py"
     ).exists()
 
 
@@ -1746,6 +1884,350 @@ def test_ai_gateway_test_route_can_reuse_stored_encrypted_secret(tmp_path: Path)
             "use_responses_api": True,
         }
     ]
+
+    engine.dispose()
+
+
+def test_snapshot_worker_uses_active_litellm_gateway_when_enabled(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    engine = get_engine(settings.database_url)
+    create_all_tables(engine)
+    app = create_app()
+    fake_github = FakeManagedGitHubClient(
+        files=[
+            {
+                "filename": REVIEW_WORKSPACE_THREAD_PATH,
+                "status": "modified",
+                "size": 2048,
+            }
+        ],
+        contents={
+            (REVIEW_WORKSPACE_THREAD_PATH, "base-sha"): fixture_text(
+                "review_workspace_thread_base.ipynb"
+            ),
+            (REVIEW_WORKSPACE_THREAD_PATH, "head-sha"): fixture_text(
+                "review_workspace_thread_head_v1.ipynb"
+            ),
+        },
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_managed_github_client] = lambda: fake_github
+    client = TestClient(app)
+
+    response = post_pull_request_webhook(
+        client,
+        payload=pull_request_payload(head_sha="head-sha"),
+        delivery_id="delivery-litellm-success",
+    )
+    assert response.status_code == 202
+
+    with session_scope(settings) as db_session:
+        installation_id = str(db_session.scalars(select(GitHubInstallation.id)).one())
+
+    create_managed_ai_gateway_fixture(settings, installation_id=installation_id)
+    fake_gateway = FakeLiteLLMGatewayClient(
+        responses=[
+            json.dumps(
+                {
+                    "summary": "AI summary",
+                    "flagged_issues": [
+                        {
+                            "notebook_path": REVIEW_WORKSPACE_THREAD_PATH,
+                            "locator": {
+                                "cell_id": None,
+                                "base_index": None,
+                                "head_index": None,
+                                "display_index": None,
+                            },
+                            "code": "ai:output_shift",
+                            "category": "output",
+                            "severity": "medium",
+                            "confidence": "medium",
+                            "message": "Explain the output shift before merge.",
+                        }
+                    ],
+                    "reviewer_guidance": [
+                        {
+                            "notebook_path": REVIEW_WORKSPACE_THREAD_PATH,
+                            "locator": None,
+                            "code": "claude:explain_output_shift",
+                            "source": "claude",
+                            "label": "AI",
+                            "priority": "medium",
+                            "message": "Explain the output shift in surrounding markdown.",
+                        }
+                    ],
+                }
+            )
+        ]
+    )
+
+    with session_scope(settings) as db_session:
+        result = run_snapshot_build_worker_once(
+            settings=settings,
+            db_session=db_session,
+            github_client=fake_github,
+            litellm_client=fake_gateway,
+        )
+
+    assert result.status == "succeeded"
+    assert len(fake_gateway.calls) == 1
+    assert fake_gateway.calls[0]["api_key"] == "Bearer managed-secret"
+    assert fake_gateway.calls[0]["static_headers"] == {"x-tenant-token": "tenant-secret"}
+
+    with session_scope(settings) as db_session:
+        snapshot = db_session.scalars(select(ReviewSnapshot)).one()
+        assert snapshot.status == ReviewSnapshotStatus.READY
+        assert snapshot.summary_text == "AI summary"
+        assert snapshot.flagged_findings_json[0]["message"] == "Explain the output shift before merge."
+        assert any(
+            item["message"] == "Explain the output shift in surrounding markdown."
+            for item in snapshot.reviewer_guidance_json
+        )
+
+    engine.dispose()
+
+
+def test_snapshot_worker_falls_back_to_deterministic_review_when_litellm_fails(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    engine = get_engine(settings.database_url)
+    create_all_tables(engine)
+    app = create_app()
+    fake_github = FakeManagedGitHubClient(
+        files=[
+            {
+                "filename": REVIEW_WORKSPACE_THREAD_PATH,
+                "status": "modified",
+                "size": 2048,
+            }
+        ],
+        contents={
+            (REVIEW_WORKSPACE_THREAD_PATH, "base-sha"): fixture_text(
+                "review_workspace_thread_base.ipynb"
+            ),
+            (REVIEW_WORKSPACE_THREAD_PATH, "head-sha"): fixture_text(
+                "review_workspace_thread_head_v1.ipynb"
+            ),
+        },
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_managed_github_client] = lambda: fake_github
+    client = TestClient(app)
+
+    response = post_pull_request_webhook(
+        client,
+        payload=pull_request_payload(head_sha="head-sha"),
+        delivery_id="delivery-litellm-fallback",
+    )
+    assert response.status_code == 202
+
+    with session_scope(settings) as db_session:
+        installation_id = str(db_session.scalars(select(GitHubInstallation.id)).one())
+
+    create_managed_ai_gateway_fixture(settings, installation_id=installation_id)
+    fake_gateway = FakeLiteLLMGatewayClient(error="gateway exploded")
+
+    with session_scope(settings) as db_session:
+        result = run_snapshot_build_worker_once(
+            settings=settings,
+            db_session=db_session,
+            github_client=fake_github,
+            litellm_client=fake_gateway,
+        )
+
+    assert result.status == "succeeded"
+    assert len(fake_gateway.calls) == 2
+
+    with session_scope(settings) as db_session:
+        snapshot = db_session.scalars(select(ReviewSnapshot)).one()
+        assert snapshot.status == ReviewSnapshotStatus.READY
+        assert snapshot.summary_text is not None
+        assert "Managed LiteLLM review unavailable: gateway exploded." in snapshot.summary_text
+        assert (
+            "Managed LiteLLM review unavailable: gateway exploded. Used deterministic local findings."
+            in snapshot.snapshot_payload_json["review"]["notices"]
+        )
+
+    engine.dispose()
+
+
+def test_rebuild_latest_route_requires_installation_admin(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    engine = get_engine(settings.database_url)
+    create_all_tables(engine)
+    review_id, _installation_id = create_ready_review_fixture(settings)
+    app = create_app()
+    fake_oauth = FakeOAuthClient(org_owner_access={("gho_member", "octo-org"): False})
+    fake_github = FakeManagedGitHubClient()
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_oauth_client] = lambda: fake_oauth
+    app.dependency_overrides[get_managed_github_client] = lambda: fake_github
+    client = TestClient(app)
+
+    session_id = create_user_session(
+        settings,
+        github_user_id=202,
+        github_login="octo-member",
+        access_token="gho_member",
+    )
+    client.cookies.set(SESSION_COOKIE_NAME, session_id)
+
+    response = client.post(f"/api/reviews/{review_id}/rebuild-latest")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Installation admin access required"}
+
+    with session_scope(settings) as db_session:
+        assert db_session.scalars(select(SnapshotBuildJob)).all() == []
+
+    engine.dispose()
+
+
+def test_rebuild_latest_route_queues_force_rebuild_job_for_installation_admin(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    engine = get_engine(settings.database_url)
+    create_all_tables(engine)
+    review_id, _installation_id = create_ready_review_fixture(settings)
+    app = create_app()
+    fake_oauth = FakeOAuthClient(org_owner_access={("gho_owner", "octo-org"): True})
+    fake_github = FakeManagedGitHubClient()
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_oauth_client] = lambda: fake_oauth
+    app.dependency_overrides[get_managed_github_client] = lambda: fake_github
+    client = TestClient(app)
+
+    session_id = create_user_session(
+        settings,
+        github_user_id=101,
+        github_login="octo-owner",
+        access_token="gho_owner",
+    )
+    client.cookies.set(SESSION_COOKIE_NAME, session_id)
+
+    response = client.post(f"/api/reviews/{review_id}/rebuild-latest")
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
+    assert response.json()["force_rebuild"] is True
+
+    with session_scope(settings) as db_session:
+        review = db_session.get(ManagedReview, uuid.UUID(response.json()["review_id"]))
+        jobs = db_session.scalars(select(SnapshotBuildJob)).all()
+        assert review is not None
+        assert review.status == ManagedReviewStatus.PENDING
+        assert len(jobs) == 1
+        assert jobs[0].force_rebuild is True
+        assert jobs[0].base_sha == "base-sha"
+        assert jobs[0].head_sha == "head-sha"
+
+    assert fake_github.check_run_calls[-1]["status"] == "queued"
+    assert "Snapshot rebuild queued for the latest push." in fake_github.check_run_calls[-1]["summary"]
+    engine.dispose()
+
+
+def test_force_rebuild_job_creates_new_snapshot_even_for_same_sha(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    engine = get_engine(settings.database_url)
+    create_all_tables(engine)
+    review_id, _installation_id = create_ready_review_fixture(
+        settings,
+        head_sha="head-sha-rebuild",
+    )
+    fake_github = FakeManagedGitHubClient(
+        files=[
+            {
+                "filename": REVIEW_WORKSPACE_THREAD_PATH,
+                "status": "modified",
+                "size": 2048,
+            }
+        ],
+        contents={
+            (REVIEW_WORKSPACE_THREAD_PATH, "base-sha"): fixture_text(
+                "review_workspace_thread_base.ipynb"
+            ),
+            (REVIEW_WORKSPACE_THREAD_PATH, "head-sha-rebuild"): fixture_text(
+                "review_workspace_thread_head_v1.ipynb"
+            ),
+        },
+    )
+
+    with session_scope(settings) as db_session:
+        review = db_session.get(ManagedReview, uuid.UUID(review_id))
+        assert review is not None
+        enqueue_snapshot_build_job(
+            db_session,
+            managed_review_id=review.id,
+            base_sha="base-sha",
+            head_sha="head-sha-rebuild",
+            force_rebuild=True,
+        )
+
+    with session_scope(settings) as db_session:
+        result = run_snapshot_build_worker_once(
+            settings=settings,
+            db_session=db_session,
+            github_client=fake_github,
+        )
+
+    assert result.status == "succeeded"
+    assert result.reused_snapshot is False
+    assert result.snapshot_index == 2
+
+    with session_scope(settings) as db_session:
+        snapshots = db_session.scalars(
+            select(ReviewSnapshot).order_by(ReviewSnapshot.snapshot_index.asc())
+        ).all()
+        assert [snapshot.snapshot_index for snapshot in snapshots] == [1, 2]
+
+    engine.dispose()
+
+
+def test_resolve_mirror_auth_context_prefers_user_token_and_falls_back_to_app_auth(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    engine = get_engine(settings.database_url)
+    create_all_tables(engine)
+
+    valid_session_id = create_user_session(
+        settings,
+        github_user_id=101,
+        github_login="reviewer",
+        access_token="gho_reviewer",
+    )
+    assert valid_session_id
+
+    create_user_session(
+        settings,
+        github_user_id=202,
+        github_login="expired-reviewer",
+        access_token="gho_expired",
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+
+    store = OAuthSessionStore(SessionTokenCipher(settings.session_secret))
+    with session_scope(settings) as db_session:
+        user_auth = resolve_mirror_auth_context(
+            db_session=db_session,
+            github_user_id=101,
+            session_store=store,
+        )
+        fallback_auth = resolve_mirror_auth_context(
+            db_session=db_session,
+            github_user_id=202,
+            session_store=store,
+        )
+
+    assert user_auth.mode == "user"
+    assert user_auth.access_token == "gho_reviewer"
+    assert user_auth.fallback_reason is None
+    assert fallback_auth.mode == "app"
+    assert fallback_auth.access_token is None
+    assert fallback_auth.fallback_reason == "user_token_unavailable"
 
     engine.dispose()
 

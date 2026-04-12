@@ -224,6 +224,7 @@ class SnapshotBuildJob(Base):
     )
     base_sha: Mapped[str] = mapped_column(String(255), nullable=False)
     head_sha: Mapped[str] = mapped_column(String(255), nullable=False)
+    force_rebuild: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[SnapshotBuildJobStatus] = mapped_column(
         SqlEnum(SnapshotBuildJobStatus, native_enum=False),
         default=SnapshotBuildJobStatus.QUEUED,

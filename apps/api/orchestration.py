@@ -5,12 +5,22 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Mapping, Sequence
+import json
 import uuid
 
+import requests
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from src.claude_integration import NoneProvider
+from src.claude_integration import (
+    DEFAULT_MAX_AI_INPUT_TOKENS,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    NoneProvider,
+    build_base_reviewer_guidance,
+    parse_strict_review_result,
+    _build_repair_prompt,
+    _prepare_ai_payload,
+)
 from src.diff_engine import DiffLimits, NotebookInput
 from src.review_core import (
     REVIEW_SNAPSHOT_SCHEMA_VERSION,
@@ -36,6 +46,8 @@ from .models import (
     GitHubInstallation,
     InstallationAccountType,
     InstallationRepository,
+    ManagedAiGatewayConfig,
+    ManagedAiGatewayProviderKind,
     ManagedReview,
     ManagedReviewStatus,
     ReviewAsset,
@@ -44,6 +56,7 @@ from .models import (
     SnapshotBuildJob,
     SnapshotBuildJobStatus,
 )
+from .oauth import SessionCipherError, SessionTokenCipher
 from .review_workspace import carry_forward_open_threads, count_review_threads
 from .reviewer_guidance import (
     NotebookLensConfigError,
@@ -104,6 +117,208 @@ class SnapshotBuildResult:
     snapshot_index: int | None
     check_run_id: int | None
     reused_snapshot: bool = False
+
+
+@dataclass(frozen=True)
+class LiteLLMGatewayResponse:
+    text: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class ManagedReviewProviderState:
+    gateway_enabled: bool
+    used_fallback: bool = False
+    fallback_notice: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+class LiteLLMGatewayError(RuntimeError):
+    """Raised when the managed LiteLLM gateway request or payload is invalid."""
+
+
+class LiteLLMGatewayClient:
+    """Minimal LiteLLM-compatible client used by the managed snapshot worker."""
+
+    def __init__(self, session: requests.Session | None = None) -> None:
+        self.session = session or requests.Session()
+
+    def complete(
+        self,
+        *,
+        config: ManagedAiGatewayConfig,
+        api_key: str,
+        static_headers: Mapping[str, str],
+        prompt: str,
+    ) -> LiteLLMGatewayResponse:
+        headers = {
+            "Accept": "application/json",
+            config.api_key_header_name: api_key,
+        }
+        headers.update({str(key): str(value) for key, value in static_headers.items()})
+
+        if config.use_responses_api:
+            path = "/responses"
+            payload = {
+                "model": config.model_name,
+                "input": prompt,
+                "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+            }
+        else:
+            path = "/chat/completions"
+            payload = {
+                "model": config.model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+            }
+
+        try:
+            response = self.session.post(
+                f"{config.base_url}{path}",
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise LiteLLMGatewayError(f"network error: {exc}") from exc
+
+        if response.status_code >= 400:
+            detail = response.text.strip() or f"status {response.status_code}"
+            raise LiteLLMGatewayError(
+                f"HTTP {response.status_code}: {detail[:300]}"
+            )
+
+        try:
+            payload_json = response.json()
+        except ValueError as exc:
+            raise LiteLLMGatewayError("gateway response was not JSON") from exc
+
+        if not isinstance(payload_json, Mapping):
+            raise LiteLLMGatewayError("gateway response JSON must be an object")
+
+        return LiteLLMGatewayResponse(
+            text=_extract_litellm_text(payload_json, use_responses_api=config.use_responses_api),
+            input_tokens=_extract_usage_value(
+                payload_json.get("usage"),
+                keys=("input_tokens", "prompt_tokens"),
+            ),
+            output_tokens=_extract_usage_value(
+                payload_json.get("usage"),
+                keys=("output_tokens", "completion_tokens"),
+            ),
+        )
+
+
+class ManagedLiteLLMReviewer:
+    """LiteLLM-backed managed reviewer with deterministic fallback on gateway failure."""
+
+    def __init__(
+        self,
+        *,
+        config: ManagedAiGatewayConfig,
+        api_key: str,
+        static_headers: Mapping[str, str],
+        reviewer_playbooks: Sequence[ReviewerPlaybook],
+        gateway_client: LiteLLMGatewayClient,
+    ) -> None:
+        self.config = config
+        self.api_key = api_key
+        self.static_headers = dict(static_headers)
+        self.reviewer_playbooks = tuple(reviewer_playbooks)
+        self.gateway_client = gateway_client
+        self.last_run_state = ManagedReviewProviderState(gateway_enabled=True)
+
+    def review(self, diff):
+        base_guidance = build_base_reviewer_guidance(
+            diff,
+            reviewer_playbooks=self.reviewer_playbooks,
+        )
+        payload = _prepare_ai_payload(
+            diff=diff,
+            base_reviewer_guidance=base_guidance,
+            redact_secrets=True,
+            redact_emails=True,
+            max_ai_input_tokens=DEFAULT_MAX_AI_INPUT_TOKENS,
+        )
+        prompt = _build_managed_gateway_prompt(payload)
+        total_input_tokens = 0
+        total_output_tokens = 0
+        raw_response: str | None = None
+
+        try:
+            gateway_response = self.gateway_client.complete(
+                config=self.config,
+                api_key=self.api_key,
+                static_headers=self.static_headers,
+                prompt=prompt,
+            )
+            raw_response = gateway_response.text
+            total_input_tokens += gateway_response.input_tokens or 0
+            total_output_tokens += gateway_response.output_tokens or 0
+            parsed = parse_strict_review_result(raw_response, diff)
+            self.last_run_state = ManagedReviewProviderState(
+                gateway_enabled=True,
+                used_fallback=False,
+                fallback_notice=None,
+                input_tokens=total_input_tokens or None,
+                output_tokens=total_output_tokens or None,
+            )
+            return parsed
+        except Exception as exc:
+            repair_prompt = _build_repair_prompt(raw_response or "", str(exc))
+            try:
+                gateway_response = self.gateway_client.complete(
+                    config=self.config,
+                    api_key=self.api_key,
+                    static_headers=self.static_headers,
+                    prompt=repair_prompt,
+                )
+                total_input_tokens += gateway_response.input_tokens or 0
+                total_output_tokens += gateway_response.output_tokens or 0
+                parsed = parse_strict_review_result(gateway_response.text, diff)
+                self.last_run_state = ManagedReviewProviderState(
+                    gateway_enabled=True,
+                    used_fallback=False,
+                    fallback_notice=None,
+                    input_tokens=total_input_tokens or None,
+                    output_tokens=total_output_tokens or None,
+                )
+                return parsed
+            except Exception as repair_exc:
+                return self._fallback(
+                    diff,
+                    reason=_truncate_provider_error(repair_exc),
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                )
+
+    def _fallback(
+        self,
+        diff,
+        *,
+        reason: str,
+        input_tokens: int,
+        output_tokens: int,
+    ):
+        base = NoneProvider().review(diff)
+        notice = (
+            f"Managed LiteLLM review unavailable: {reason}. "
+            "Used deterministic local findings."
+        )
+        self.last_run_state = ManagedReviewProviderState(
+            gateway_enabled=True,
+            used_fallback=True,
+            fallback_notice=notice,
+            input_tokens=input_tokens or None,
+            output_tokens=output_tokens or None,
+        )
+        return type(base)(
+            summary=notice if base.summary is None else f"{notice}\n\n{base.summary}",
+            flagged_issues=base.flagged_issues,
+            reviewer_guidance=base.reviewer_guidance,
+        )
 
 
 def ingest_pull_request_webhook(
@@ -228,6 +443,7 @@ def run_snapshot_build_worker_once(
     settings: ApiSettings,
     db_session: Session,
     github_client: ManagedGitHubClient,
+    litellm_client: LiteLLMGatewayClient | None = None,
     limits: DiffLimits = DiffLimits(),
     now: datetime | None = None,
 ) -> SnapshotBuildResult:
@@ -266,7 +482,7 @@ def run_snapshot_build_worker_once(
         .order_by(ReviewSnapshot.snapshot_index.desc())
         .limit(1)
     ).scalar_one_or_none()
-    if existing_ready_snapshot is not None:
+    if existing_ready_snapshot is not None and not job.force_rebuild:
         if _job_matches_latest_review(review=review, job=job):
             review.status = ManagedReviewStatus.READY
             review.latest_snapshot_id = existing_ready_snapshot.id
@@ -323,13 +539,21 @@ def run_snapshot_build_worker_once(
             ref=job.head_sha,
         )
         playbooks, guidance_notices = _load_reviewer_playbooks(config_text)
+        reviewer, provider_state, provider_notices = _resolve_managed_reviewer(
+            db_session=db_session,
+            settings=settings,
+            installation=installation,
+            playbooks=playbooks,
+            gateway_client=litellm_client or LiteLLMGatewayClient(),
+        )
         review_artifacts = build_review_artifacts(
             ReviewCoreRequest(
                 notebook_inputs=notebook_inputs,
-                reviewer=NoneProvider(),
+                reviewer=reviewer,
                 limits=limits,
             )
         )
+        provider_state = getattr(reviewer, "last_run_state", provider_state)
         snapshot_payload = review_artifacts.snapshot_payload
         asset_ids_by_key = _persist_review_assets(
             db_session=db_session,
@@ -340,22 +564,36 @@ def run_snapshot_build_worker_once(
             snapshot_payload=snapshot_payload,
             asset_ids_by_key=asset_ids_by_key,
         )
-        if guidance_notices:
+        if guidance_notices or provider_notices:
             snapshot_payload = {
                 **snapshot_payload,
                 "review": {
                     **snapshot_payload["review"],
-                    "notices": [
-                        *snapshot_payload["review"].get("notices", []),
-                        *guidance_notices,
-                    ],
+                    "notices": _merge_review_notices(
+                        snapshot_payload["review"].get("notices", []),
+                        guidance_notices,
+                        provider_notices,
+                    ),
                 },
             }
-        reviewer_guidance = build_reviewer_guidance(
-            review_artifacts.notebook_diff,
-            playbooks=playbooks,
+        reviewer_guidance = _merge_snapshot_reviewer_guidance(
+            build_reviewer_guidance(
+                review_artifacts.notebook_diff,
+                playbooks=playbooks,
+            ),
+            review_artifacts.review_result.reviewer_guidance,
         )
-
+        if provider_state.used_fallback and provider_state.fallback_notice:
+            snapshot_payload = {
+                **snapshot_payload,
+                "review": {
+                    **snapshot_payload["review"],
+                    "notices": _merge_review_notices(
+                        snapshot_payload["review"].get("notices", []),
+                        [provider_state.fallback_notice],
+                    ),
+                },
+            }
         snapshot.status = ReviewSnapshotStatus.READY
         snapshot.schema_version = int(snapshot_payload["schema_version"])
         snapshot.summary_text = review_artifacts.review_result.summary
@@ -744,6 +982,280 @@ def _coerce_notebook_file(raw_file: Any) -> dict[str, Any] | None:
     }
 
 
+def _resolve_managed_reviewer(
+    *,
+    db_session: Session,
+    settings: ApiSettings,
+    installation: GitHubInstallation,
+    playbooks: Sequence[ReviewerPlaybook],
+    gateway_client: LiteLLMGatewayClient,
+) -> tuple[Any, ManagedReviewProviderState, list[str]]:
+    config = _load_active_managed_ai_gateway_config(
+        db_session=db_session,
+        installation_id=installation.id,
+    )
+    if config is None:
+        return NoneProvider(), ManagedReviewProviderState(gateway_enabled=False), []
+
+    try:
+        api_key, static_headers = _decrypt_managed_ai_gateway_secrets(
+            settings=settings,
+            config=config,
+        )
+    except ValueError as exc:
+        notice = (
+            f"Managed LiteLLM review unavailable: {_truncate_provider_error(exc)}. "
+            "Used deterministic local findings."
+        )
+        return (
+            NoneProvider(),
+            ManagedReviewProviderState(
+                gateway_enabled=True,
+                used_fallback=True,
+                fallback_notice=notice,
+            ),
+            [notice],
+        )
+
+    return (
+        ManagedLiteLLMReviewer(
+            config=config,
+            api_key=api_key,
+            static_headers=static_headers,
+            reviewer_playbooks=playbooks,
+            gateway_client=gateway_client,
+        ),
+        ManagedReviewProviderState(gateway_enabled=True),
+        [],
+    )
+
+
+def _load_active_managed_ai_gateway_config(
+    *,
+    db_session: Session,
+    installation_id: uuid.UUID,
+) -> ManagedAiGatewayConfig | None:
+    return db_session.execute(
+        select(ManagedAiGatewayConfig).where(
+            ManagedAiGatewayConfig.installation_id == installation_id,
+            ManagedAiGatewayConfig.active.is_(True),
+            ManagedAiGatewayConfig.provider_kind == ManagedAiGatewayProviderKind.LITELLM,
+        )
+    ).scalar_one_or_none()
+
+
+def _decrypt_managed_ai_gateway_secrets(
+    *,
+    settings: ApiSettings,
+    config: ManagedAiGatewayConfig,
+) -> tuple[str, dict[str, str]]:
+    cipher = SessionTokenCipher(settings.encryption_key)
+    try:
+        api_key = cipher.decrypt(config.api_key_encrypted)
+    except SessionCipherError as exc:
+        raise ValueError("stored LiteLLM API key could not be decrypted") from exc
+
+    if not config.static_headers_encrypted_json:
+        return api_key, {}
+
+    try:
+        static_headers_payload = cipher.decrypt(config.static_headers_encrypted_json)
+    except SessionCipherError as exc:
+        raise ValueError("stored LiteLLM static headers could not be decrypted") from exc
+
+    try:
+        raw_headers = json.loads(static_headers_payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError("stored LiteLLM static headers are invalid") from exc
+
+    if not isinstance(raw_headers, Mapping):
+        raise ValueError("stored LiteLLM static headers are invalid")
+
+    return api_key, {str(key): str(value) for key, value in raw_headers.items()}
+
+
+def _merge_review_notices(*notice_groups: Sequence[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in notice_groups:
+        for raw_notice in group:
+            if not isinstance(raw_notice, str):
+                continue
+            notice = raw_notice.strip()
+            if not notice or notice in seen:
+                continue
+            seen.add(notice)
+            merged.append(notice)
+    return merged
+
+
+def _merge_snapshot_reviewer_guidance(
+    base_items: Sequence[Mapping[str, Any]],
+    ai_items: Sequence[Any],
+) -> list[dict[str, Any]]:
+    combined: list[dict[str, Any]] = [dict(item) for item in base_items]
+    for item in ai_items:
+        combined.append(asdict(item))
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in combined:
+        notebook_path = str(item.get("notebook_path", "")).strip()
+        message = " ".join(str(item.get("message", "")).strip().lower().split())
+        if not notebook_path or not message:
+            continue
+        key = (notebook_path, message)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    source_order = {"built_in": 0, "playbook": 1, "claude": 2}
+    deduped.sort(
+        key=lambda item: (
+            priority_order.get(str(item.get("priority")), 99),
+            source_order.get(str(item.get("source")), 99),
+            str(item.get("notebook_path")),
+            str(item.get("code")),
+            str(item.get("message")),
+        )
+    )
+    return deduped
+
+
+def _build_managed_gateway_prompt(redacted_payload: Mapping[str, Any]) -> str:
+    payload_json = json.dumps(
+        redacted_payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    schema_json = json.dumps(
+        {
+            "summary": "string|null",
+            "flagged_issues": [
+                {
+                    "notebook_path": "string",
+                    "locator": {
+                        "cell_id": "string|null",
+                        "base_index": "int|null",
+                        "head_index": "int|null",
+                        "display_index": "int|null",
+                    },
+                    "code": "string",
+                    "category": (
+                        "documentation|output|error|data|metadata|policy|review_guidance"
+                    ),
+                    "severity": "low|medium|high",
+                    "confidence": "low|medium|high|null",
+                    "message": "string",
+                }
+            ],
+            "reviewer_guidance": [
+                {
+                    "notebook_path": "string",
+                    "locator": {
+                        "cell_id": "string|null",
+                        "base_index": "int|null",
+                        "head_index": "int|null",
+                        "display_index": "int|null",
+                    },
+                    "code": "claude:string",
+                    "source": "claude",
+                    "label": "string|null",
+                    "priority": "low|medium|high",
+                    "message": "string",
+                }
+            ],
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return (
+        "You are NotebookLens. Review the provided notebook diff payload and return ONLY valid JSON.\n"
+        "No markdown. No code fences. No prose outside JSON.\n"
+        "Follow this exact schema and key names:\n"
+        f"{schema_json}\n"
+        "Rules:\n"
+        "- Keep findings conservative, objective, and tied to changed cells.\n"
+        "- Only reference notebook paths that exist in the payload.\n"
+        "- Include flagged_issues only when meaningful.\n"
+        "- base_reviewer_guidance already contains deterministic and playbook guidance.\n"
+        "- reviewer_guidance must contain only NEW AI-added guidance items.\n"
+        "- Do not repeat, remove, or rewrite any base_reviewer_guidance items.\n"
+        "- Every reviewer_guidance item must use source=claude and code values starting with claude:.\n"
+        "- summary may be null when no extra AI summary is useful.\n"
+        "Diff payload:\n"
+        f"{payload_json}"
+    )
+
+
+def _extract_litellm_text(
+    payload: Mapping[str, Any],
+    *,
+    use_responses_api: bool,
+) -> str:
+    if use_responses_api:
+        output_text = payload.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
+
+        output = payload.get("output")
+        if isinstance(output, list):
+            parts: list[str] = []
+            for block in output:
+                if not isinstance(block, Mapping):
+                    continue
+                content = block.get("content")
+                if not isinstance(content, list):
+                    continue
+                for item in content:
+                    if not isinstance(item, Mapping):
+                        continue
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+            merged = "\n".join(parts).strip()
+            if merged:
+                return merged
+        raise LiteLLMGatewayError("responses output did not include text")
+
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise LiteLLMGatewayError("chat completions response missing choices")
+    first_choice = choices[0]
+    if not isinstance(first_choice, Mapping):
+        raise LiteLLMGatewayError("chat completions response choice was invalid")
+    message = first_choice.get("message")
+    if not isinstance(message, Mapping):
+        raise LiteLLMGatewayError("chat completions response missing message")
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    if isinstance(content, list):
+        parts = [
+            str(item.get("text", "")).strip()
+            for item in content
+            if isinstance(item, Mapping) and str(item.get("text", "")).strip()
+        ]
+        merged = "\n".join(parts).strip()
+        if merged:
+            return merged
+    raise LiteLLMGatewayError("chat completions response had no text content")
+
+
+def _extract_usage_value(usage: Any, *, keys: Sequence[str]) -> int | None:
+    if not isinstance(usage, Mapping):
+        return None
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, int) and value >= 0:
+            return value
+    return None
+
+
 def _create_pending_snapshot(
     *,
     db_session: Session,
@@ -900,6 +1412,10 @@ def _truncate_error(exc: BaseException) -> str:
     return message[:300]
 
 
+def _truncate_provider_error(exc: BaseException) -> str:
+    return _truncate_error(exc)
+
+
 def _require_mapping(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = payload.get(key)
     if isinstance(value, Mapping):
@@ -934,6 +1450,8 @@ def _optional_str(payload: Mapping[str, Any] | Any, key: str) -> str | None:
 
 
 __all__ = [
+    "LiteLLMGatewayClient",
+    "LiteLLMGatewayResponse",
     "MANAGED_REVIEW_CHECK_RUN_NAME",
     "ManagedWebhookPayloadError",
     "PullRequestWebhook",
