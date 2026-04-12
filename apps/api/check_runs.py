@@ -7,7 +7,14 @@ from sqlalchemy.orm import Session, selectinload
 
 from .config import ApiSettings
 from .managed_github import ManagedGitHubClient
-from .models import InstallationRepository, ManagedReview, ManagedReviewStatus, ReviewSnapshot
+from .models import (
+    InstallationRepository,
+    ManagedReview,
+    ManagedReviewStatus,
+    ReviewSnapshot,
+    SnapshotBuildJob,
+    SnapshotBuildJobStatus,
+)
 from .review_workspace import count_review_threads
 
 
@@ -102,7 +109,27 @@ def sync_review_workspace_check_run(
 
     if hydrated_review.status == ManagedReviewStatus.PENDING:
         snapshot_status = "pending"
-        check_run_status = "in_progress"
+        active_job = db_session.execute(
+            select(SnapshotBuildJob)
+            .where(
+                SnapshotBuildJob.managed_review_id == hydrated_review.id,
+                SnapshotBuildJob.base_sha == hydrated_review.latest_base_sha,
+                SnapshotBuildJob.head_sha == hydrated_review.latest_head_sha,
+                SnapshotBuildJob.status.in_(
+                    (
+                        SnapshotBuildJobStatus.QUEUED,
+                        SnapshotBuildJobStatus.RUNNING,
+                        SnapshotBuildJobStatus.RETRYABLE_FAILED,
+                    )
+                ),
+            )
+            .order_by(SnapshotBuildJob.scheduled_at.asc(), SnapshotBuildJob.id.asc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if active_job is not None and active_job.status == SnapshotBuildJobStatus.RUNNING:
+            check_run_status = "in_progress"
+        else:
+            check_run_status = "queued"
         conclusion = None
         details_url = build_review_url(settings=settings, review=hydrated_review)
     elif hydrated_review.status == ManagedReviewStatus.FAILED:

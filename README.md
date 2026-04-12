@@ -48,6 +48,8 @@ jobs:
 
 The hosted parity beta is a separate GitHub App + web app flow. It does not replace the OSS Action, and it does not add new public Action `with:` inputs.
 
+Managed beta deployments use `APP_BASE_URL` as the shared public base URL for the hosted review UI and its `/api/...` routes.
+
 1. Install the NotebookLens GitHub App on the repositories you want to review.
 2. Sign in to NotebookLens with GitHub OAuth.
 3. Open or update a pull request with `.ipynb` changes.

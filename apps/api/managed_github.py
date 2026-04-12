@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 import requests
 
+from src import __display_version__
 from src.github_api import GitHubApiClient
 
 from .config import ApiSettings
@@ -133,7 +134,7 @@ class ManagedGitHubClient:
             headers={
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {token.token}",
-                "User-Agent": "notebooklens-managed/0.3.0-beta",
+                "User-Agent": f"notebooklens-managed/{__display_version__}",
                 "X-GitHub-Api-Version": GITHUB_API_VERSION,
             },
             json=payload,

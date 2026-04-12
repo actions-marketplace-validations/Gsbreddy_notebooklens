@@ -27,6 +27,7 @@ def upgrade() -> None:
         sa.Column("managed_review_id", sa.Uuid(), nullable=False),
         sa.Column("origin_snapshot_id", sa.Uuid(), nullable=False),
         sa.Column("current_snapshot_id", sa.Uuid(), nullable=False),
+        sa.Column("origin_anchor_json", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("anchor_json", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column(
             "status",

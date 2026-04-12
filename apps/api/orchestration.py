@@ -187,25 +187,6 @@ def ingest_pull_request_webhook(
             check_run_id=check_run.check_run_id,
         )
 
-    check_run = github_client.create_or_update_check_run(
-        settings=settings,
-        installation_id=installation.github_installation_id,
-        repository=repository.full_name,
-        head_sha=webhook.head_sha,
-        status="in_progress",
-        details_url=details_url,
-        external_id=str(review.id),
-        summary=render_review_workspace_check_run_summary(
-            review_url=details_url,
-            snapshot_status="pending",
-            activity="Snapshot queued for the latest push.",
-            unresolved_threads=thread_counts.unresolved,
-            resolved_threads=thread_counts.resolved,
-            outdated_threads=thread_counts.outdated,
-        ),
-        check_run_id=reusable_check_run_id,
-    )
-    review.latest_check_run_id = check_run.check_run_id
     review.status = ManagedReviewStatus.PENDING
 
     if job is None:
@@ -216,6 +197,15 @@ def ingest_pull_request_webhook(
             head_sha=webhook.head_sha,
         )
 
+    review.latest_check_run_id = reusable_check_run_id
+    check_run_id = sync_review_workspace_check_run(
+        settings=settings,
+        db_session=db_session,
+        github_client=github_client,
+        review=review,
+        activity="Snapshot queued for the latest push.",
+    )
+
     db_session.flush()
     return WebhookIngestionResult(
         accepted=True,
@@ -223,7 +213,7 @@ def ingest_pull_request_webhook(
         action=webhook.action,
         managed_review_id=review.id,
         job_id=job.id,
-        check_run_id=check_run.check_run_id,
+        check_run_id=check_run_id,
     )
 
 
@@ -296,6 +286,15 @@ def run_snapshot_build_worker_once(
             snapshot_index=existing_ready_snapshot.snapshot_index,
             check_run_id=check_run_id,
             reused_snapshot=True,
+        )
+
+    if _job_matches_latest_review(review=review, job=job):
+        sync_review_workspace_check_run(
+            settings=settings,
+            db_session=db_session,
+            github_client=github_client,
+            review=review,
+            activity=f"Snapshot build started for head `{_short_sha(job.head_sha)}`.",
         )
 
     snapshot = _create_pending_snapshot(db_session=db_session, review=review, job=job)

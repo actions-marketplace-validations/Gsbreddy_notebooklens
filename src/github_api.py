@@ -10,6 +10,7 @@ from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
+from . import __display_version__
 from .diff_engine import (
     CellChange,
     CellLocator,
@@ -487,7 +488,7 @@ class GitHubApiClient:
         headers = {
             "Accept": accept,
             "X-GitHub-Api-Version": self.api_version,
-            "User-Agent": "notebooklens-action/0.3.0-beta",
+            "User-Agent": f"notebooklens-action/{__display_version__}",
         }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"

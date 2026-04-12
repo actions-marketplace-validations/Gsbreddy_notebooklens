@@ -289,6 +289,7 @@ class ReviewThread(TimestampMixin, Base):
         ForeignKey("review_snapshots.id", ondelete="CASCADE"),
         nullable=False,
     )
+    origin_anchor_json: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
     anchor_json: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
     status: Mapped[ReviewThreadStatus] = mapped_column(
         SqlEnum(ReviewThreadStatus, native_enum=False),

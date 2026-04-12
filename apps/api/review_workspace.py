@@ -52,6 +52,10 @@ class ThreadCounts:
     outdated: int = 0
 
 
+def _touch_review(review: ManagedReview) -> None:
+    review.updated_at = datetime.now(timezone.utc)
+
+
 def count_review_threads(*, db_session: Session, managed_review_id: uuid.UUID) -> ThreadCounts:
     db_session.flush()
     rows = db_session.execute(
@@ -157,7 +161,10 @@ def get_workspace_payload(
             ],
         },
         "snapshot": _serialize_snapshot(selected_snapshot) if selected_snapshot else None,
-        "threads": [_serialize_thread(thread) for thread in visible_threads],
+        "threads": [
+            _serialize_thread(thread, snapshot_id=selected_snapshot.id if selected_snapshot else None)
+            for thread in visible_threads
+        ],
     }
 
 
@@ -185,12 +192,15 @@ def create_thread(
         raise ReviewWorkspaceValidationError("Threads can only be created on ready snapshots")
     if not snapshot_contains_anchor(snapshot.snapshot_payload_json, normalized_anchor):
         raise ReviewWorkspaceValidationError("Thread anchor does not exist on the selected snapshot")
+    if not snapshot_allows_thread_creation(snapshot.snapshot_payload_json, normalized_anchor):
+        raise ReviewWorkspaceValidationError("Threads can only be created on changed blocks")
 
     body = _normalize_markdown(body_markdown)
     thread = ReviewThread(
         managed_review_id=review.id,
         origin_snapshot_id=snapshot.id,
         current_snapshot_id=snapshot.id,
+        origin_anchor_json=normalized_anchor,
         anchor_json=normalized_anchor,
         status=ReviewThreadStatus.OPEN,
         carried_forward=False,
@@ -208,6 +218,7 @@ def create_thread(
     db_session.add(message)
     db_session.flush()
     db_session.refresh(thread)
+    _touch_review(review)
     _enqueue_notifications(
         db_session=db_session,
         review=review,
@@ -215,6 +226,8 @@ def create_thread(
         actor_github_user_id=actor_github_user_id,
         actor_login=actor_login,
         event_type=NotificationEventType.THREAD_CREATED,
+        message_id=message.id,
+        message_body_markdown=message.body_markdown,
         oauth_client=oauth_client,
         session_store=session_store,
     )
@@ -241,6 +254,7 @@ def add_thread_message(
     )
     db_session.add(message)
     thread.updated_at = datetime.now(timezone.utc)
+    _touch_review(thread.managed_review)
     db_session.flush()
     db_session.expire(thread, ["messages"])
     _enqueue_notifications(
@@ -250,6 +264,8 @@ def add_thread_message(
         actor_github_user_id=actor_github_user_id,
         actor_login=actor_login,
         event_type=NotificationEventType.REPLY_ADDED,
+        message_id=message.id,
+        message_body_markdown=message.body_markdown,
         oauth_client=oauth_client,
         session_store=session_store,
     )
@@ -272,6 +288,7 @@ def resolve_thread(
     thread.status = ReviewThreadStatus.RESOLVED
     thread.resolved_at = datetime.now(timezone.utc)
     thread.resolved_by_github_user_id = actor_github_user_id
+    _touch_review(thread.managed_review)
     db_session.flush()
     _enqueue_notifications(
         db_session=db_session,
@@ -280,6 +297,8 @@ def resolve_thread(
         actor_github_user_id=actor_github_user_id,
         actor_login=actor_login,
         event_type=NotificationEventType.THREAD_RESOLVED,
+        message_id=None,
+        message_body_markdown=None,
         oauth_client=oauth_client,
         session_store=session_store,
     )
@@ -307,6 +326,7 @@ def reopen_thread(
     )
     thread.resolved_at = None
     thread.resolved_by_github_user_id = None
+    _touch_review(thread.managed_review)
     db_session.flush()
     _enqueue_notifications(
         db_session=db_session,
@@ -315,6 +335,8 @@ def reopen_thread(
         actor_github_user_id=actor_github_user_id,
         actor_login=actor_login,
         event_type=NotificationEventType.THREAD_REOPENED,
+        message_id=None,
+        message_body_markdown=None,
         oauth_client=oauth_client,
         session_store=session_store,
     )
@@ -412,12 +434,42 @@ def snapshot_contains_anchor(snapshot_payload: Mapping[str, Any], anchor: Mappin
     return any(candidate == dict(anchor) for candidate in iter_snapshot_anchors(snapshot_payload))
 
 
+def snapshot_allows_thread_creation(
+    snapshot_payload: Mapping[str, Any],
+    anchor: Mapping[str, Any],
+) -> bool:
+    normalized_anchor = normalize_thread_anchor(anchor)
+    for row in iter_snapshot_render_rows(snapshot_payload):
+        thread_anchors = row.get("thread_anchors")
+        if not isinstance(thread_anchors, Mapping):
+            continue
+        candidate = thread_anchors.get(normalized_anchor["block_kind"])
+        if not isinstance(candidate, Mapping):
+            continue
+        if normalize_thread_anchor(candidate) != normalized_anchor:
+            continue
+        return _row_block_changed(row, normalized_anchor["block_kind"])
+    return False
+
+
 def iter_snapshot_anchors(snapshot_payload: Mapping[str, Any]) -> Iterable[dict[str, Any]]:
+    anchors: list[dict[str, Any]] = []
+    for row in iter_snapshot_render_rows(snapshot_payload):
+        thread_anchors = row.get("thread_anchors")
+        if not isinstance(thread_anchors, Mapping):
+            continue
+        for candidate in thread_anchors.values():
+            if isinstance(candidate, Mapping):
+                anchors.append(normalize_thread_anchor(candidate))
+    return tuple(anchors)
+
+
+def iter_snapshot_render_rows(snapshot_payload: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
     review = snapshot_payload.get("review")
     notebooks = review.get("notebooks") if isinstance(review, Mapping) else None
     if not isinstance(notebooks, list):
         return ()
-    anchors: list[dict[str, Any]] = []
+    rows: list[Mapping[str, Any]] = []
     for notebook in notebooks:
         if not isinstance(notebook, Mapping):
             continue
@@ -425,15 +477,9 @@ def iter_snapshot_anchors(snapshot_payload: Mapping[str, Any]) -> Iterable[dict[
         if not isinstance(render_rows, list):
             continue
         for row in render_rows:
-            if not isinstance(row, Mapping):
-                continue
-            thread_anchors = row.get("thread_anchors")
-            if not isinstance(thread_anchors, Mapping):
-                continue
-            for candidate in thread_anchors.values():
-                if isinstance(candidate, Mapping):
-                    anchors.append(normalize_thread_anchor(candidate))
-    return tuple(anchors)
+            if isinstance(row, Mapping):
+                rows.append(row)
+    return tuple(rows)
 
 
 def anchors_match_for_carry_forward(
@@ -526,6 +572,8 @@ def _enqueue_notifications(
     actor_github_user_id: int,
     actor_login: str,
     event_type: NotificationEventType,
+    message_id: uuid.UUID | None,
+    message_body_markdown: str | None,
     oauth_client: GitHubOAuthClient,
     session_store: OAuthSessionStore,
 ) -> None:
@@ -548,6 +596,10 @@ def _enqueue_notifications(
         "actor_login": actor_login,
         "event_type": event_type.value,
     }
+    if message_id is not None:
+        payload["message_id"] = str(message_id)
+    if isinstance(message_body_markdown, str) and message_body_markdown.strip():
+        payload["message_body_markdown"] = message_body_markdown.strip()
     for recipient_id, recipient_email in recipients:
         db_session.add(
             NotificationOutbox(
@@ -650,6 +702,17 @@ def _select_snapshot(
     return snapshots[-1] if snapshots else None
 
 
+def _row_block_changed(row: Mapping[str, Any], block_kind: SnapshotBlockKind) -> bool:
+    if block_kind == "source":
+        source = row.get("source")
+        return isinstance(source, Mapping) and bool(source.get("changed"))
+    if block_kind == "outputs":
+        outputs = row.get("outputs")
+        return isinstance(outputs, Mapping) and bool(outputs.get("changed"))
+    metadata = row.get("metadata")
+    return isinstance(metadata, Mapping) and bool(metadata.get("changed"))
+
+
 def _serialize_snapshot(snapshot: ReviewSnapshot) -> dict[str, Any]:
     return {
         "id": str(snapshot.id),
@@ -669,13 +732,30 @@ def _serialize_snapshot(snapshot: ReviewSnapshot) -> dict[str, Any]:
     }
 
 
-def _serialize_thread(thread: ReviewThread) -> dict[str, Any]:
+def _effective_thread_anchor(
+    thread: ReviewThread,
+    *,
+    snapshot_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    raw_anchor: Any
+    if snapshot_id is not None and snapshot_id == thread.origin_snapshot_id:
+        raw_anchor = thread.origin_anchor_json
+    else:
+        raw_anchor = thread.anchor_json
+    return dict(raw_anchor) if isinstance(raw_anchor, Mapping) else {}
+
+
+def _serialize_thread(
+    thread: ReviewThread,
+    *,
+    snapshot_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
     return {
         "id": str(thread.id),
         "managed_review_id": str(thread.managed_review_id),
         "origin_snapshot_id": str(thread.origin_snapshot_id),
         "current_snapshot_id": str(thread.current_snapshot_id),
-        "anchor": thread.anchor_json,
+        "anchor": _effective_thread_anchor(thread, snapshot_id=snapshot_id),
         "status": thread.status.value,
         "carried_forward": thread.carried_forward,
         "created_by_github_user_id": thread.created_by_github_user_id,

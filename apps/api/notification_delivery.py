@@ -10,6 +10,8 @@ import requests
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from src import __display_version__
+
 from .check_runs import build_review_url
 from .config import ApiConfigurationError, ApiSettings
 from .models import NotificationDeliveryState, NotificationEventType, NotificationOutbox, ReviewThread
@@ -60,7 +62,7 @@ class ResendEmailClient:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "notebooklens-managed/0.3.0-beta",
+                "User-Agent": f"notebooklens-managed/{__display_version__}",
             },
             json={
                 "from": self.email_from,
@@ -151,7 +153,7 @@ def _build_transactional_email(
         review=review,
         snapshot_index=snapshot_index,
     )
-    latest_message = thread.messages[-1].body_markdown if thread.messages else None
+    event_message = _payload_str(notification.payload_json, "message_body_markdown")
     subject = _notification_subject(notification.event_type, review.owner, review.repo, review.pull_number)
 
     action_line = _notification_action_line(
@@ -165,10 +167,10 @@ def _build_transactional_email(
         action_line,
         f"Open in NotebookLens: {review_url}",
     ]
-    if latest_message:
+    if event_message:
         lines.append("")
         lines.append("Latest thread message:")
-        lines.append(latest_message)
+        lines.append(event_message)
 
     escaped_action_line = escape(action_line)
     escaped_review_url = escape(review_url)
@@ -179,9 +181,9 @@ def _build_transactional_email(
         f"<strong>Pull request:</strong> #{review.pull_number}</p>",
         f"<p><a href=\"{escaped_review_url}\">Open in NotebookLens</a></p>",
     ]
-    if latest_message:
+    if event_message:
         html_parts.append(
-            f"<p><strong>Latest thread message:</strong><br>{escape(latest_message)}</p>"
+            f"<p><strong>Latest thread message:</strong><br>{escape(event_message)}</p>"
         )
 
     return TransactionalEmail(

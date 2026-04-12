@@ -5,6 +5,8 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from src import __display_version__
+
 from .config import ApiConfigurationError
 from .managed_github import ManagedGitHubClientError
 from .orchestration import ManagedWebhookPayloadError
@@ -17,7 +19,7 @@ from .webhooks import GitHubWebhookVerificationError
 
 def create_app() -> FastAPI:
     """Create the managed NotebookLens FastAPI application."""
-    app = FastAPI(title="NotebookLens Managed API", version="0.3.0-beta")
+    app = FastAPI(title="NotebookLens Managed API", version=__display_version__)
     app.include_router(health_router)
     app.include_router(github_router)
     app.include_router(auth_router)

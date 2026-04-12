@@ -108,7 +108,7 @@ async function readErrorDetail(response: Response): Promise<string> {
 
 function getApiBaseUrl(): string {
   return (
-    process.env.NOTEBOOKLENS_API_BASE_URL?.replace(/\/$/, "") ||
+    process.env.APP_BASE_URL?.replace(/\/$/, "") ||
     "http://127.0.0.1:8000"
   );
 }
