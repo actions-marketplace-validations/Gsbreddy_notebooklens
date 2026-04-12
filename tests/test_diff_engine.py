@@ -13,6 +13,10 @@ def fixture_text(name: str) -> str:
     return (FIXTURES_DIR / name).read_text(encoding="utf-8")
 
 
+def fixture_json(name: str) -> dict[str, object]:
+    return json.loads(fixture_text(name))
+
+
 def _input(
     *,
     path: str,
@@ -141,6 +145,70 @@ def test_metadata_only_fixture_ignores_non_material_churn() -> None:
     notebook = diff.notebooks[0]
     assert notebook.cell_changes == []
     assert notebook.notices == []
+
+
+def test_review_workspace_thread_fixtures_capture_churn_model_progression() -> None:
+    base = fixture_json("review_workspace_thread_base.ipynb")
+    head_v1 = fixture_json("review_workspace_thread_head_v1.ipynb")
+    head_v2 = fixture_json("review_workspace_thread_head_v2.ipynb")
+
+    base_cells = base["cells"]  # type: ignore[index]
+    head_v1_cells = head_v1["cells"]  # type: ignore[index]
+    head_v2_cells = head_v2["cells"]  # type: ignore[index]
+
+    assert [cell["id"] for cell in base_cells] == [  # type: ignore[index]
+        "intro-cell",
+        "load-data-cell",
+        "seed-cell",
+        "metric-cell",
+    ]
+    assert base_cells[0]["source"] == head_v1_cells[0]["source"]  # type: ignore[index]
+    assert "train.csv" in "".join(base_cells[1]["source"])  # type: ignore[index]
+    assert "train_v2.csv" in "".join(head_v1_cells[1]["source"])  # type: ignore[index]
+    assert "seed = 42" in "".join(base_cells[2]["source"])  # type: ignore[index]
+    assert "seed = 7" in "".join(head_v1_cells[2]["source"])  # type: ignore[index]
+    assert base_cells[3]["outputs"][0]["text"] == "accuracy = 0.81\n"  # type: ignore[index]
+    assert head_v1_cells[3]["outputs"][0]["text"] == "accuracy = 0.73\n"  # type: ignore[index]
+    assert "train_v2.csv" in "".join(head_v2_cells[0]["source"])  # type: ignore[index]
+    assert head_v2_cells[3]["outputs"][0]["text"] == "accuracy = 0.78\n"  # type: ignore[index]
+
+    v1_diff = build_notebook_diff(
+        [
+            _input(
+                path="notebooks/training/churn_model.ipynb",
+                change_type="modified",
+                base_fixture="review_workspace_thread_base.ipynb",
+                head_fixture="review_workspace_thread_head_v1.ipynb",
+            )
+        ]
+    )
+    v2_diff = build_notebook_diff(
+        [
+            _input(
+                path="notebooks/training/churn_model.ipynb",
+                change_type="modified",
+                base_fixture="review_workspace_thread_head_v1.ipynb",
+                head_fixture="review_workspace_thread_head_v2.ipynb",
+            )
+        ]
+    )
+
+    v1_changes = {
+        change.locator.cell_id: change
+        for change in v1_diff.notebooks[0].cell_changes
+    }
+    assert v1_diff.notebooks[0].path == "notebooks/training/churn_model.ipynb"
+    assert v1_changes["load-data-cell"].change_type == "modified"
+    assert v1_changes["seed-cell"].change_type == "modified"
+    assert v1_changes["metric-cell"].change_type == "output_changed"
+
+    v2_changes = {
+        change.locator.cell_id: change
+        for change in v2_diff.notebooks[0].cell_changes
+    }
+    assert v2_changes["intro-cell"].change_type == "modified"
+    assert v2_changes["metric-cell"].change_type == "output_changed"
+    assert v2_changes["metric-cell"].base_source == v2_changes["metric-cell"].head_source
 
 
 def test_malformed_fixture_is_skipped_with_parse_notice() -> None:

@@ -70,6 +70,7 @@ def _generate_private_key() -> str:
 
 TEST_PRIVATE_KEY = _generate_private_key()
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+REVIEW_WORKSPACE_THREAD_PATH = "notebooks/training/churn_model.ipynb"
 
 
 class FakeOAuthClient:
@@ -767,14 +768,18 @@ def test_review_workspace_routes_persist_threads_notifications_and_snapshot_hist
     fake_github = FakeManagedGitHubClient(
         files=[
             {
-                "filename": "analysis/notebook.ipynb",
+                "filename": REVIEW_WORKSPACE_THREAD_PATH,
                 "status": "modified",
                 "size": 2048,
             }
         ],
         contents={
-            ("analysis/notebook.ipynb", "base-sha"): review_thread_notebook("0.81"),
-            ("analysis/notebook.ipynb", "head-sha-1"): review_thread_notebook("0.73"),
+            (REVIEW_WORKSPACE_THREAD_PATH, "base-sha"): fixture_text(
+                "review_workspace_thread_base.ipynb"
+            ),
+            (REVIEW_WORKSPACE_THREAD_PATH, "head-sha-1"): fixture_text(
+                "review_workspace_thread_head_v1.ipynb"
+            ),
         },
     )
     fake_oauth = FakeOAuthClient(
@@ -837,12 +842,16 @@ def test_review_workspace_routes_persist_threads_notifications_and_snapshot_hist
     workspace = review_response.json()
     assert workspace["review"]["selected_snapshot_index"] == 1
     assert len(workspace["review"]["snapshot_history"]) == 1
+    notebook = workspace["snapshot"]["payload"]["review"]["notebooks"][0]
+    assert notebook["path"] == REVIEW_WORKSPACE_THREAD_PATH
 
     row = next(
         item
-        for item in workspace["snapshot"]["payload"]["review"]["notebooks"][0]["render_rows"]
-        if item["outputs"]["changed"]
+        for item in notebook["render_rows"]
+        if item["locator"]["cell_id"] == "metric-cell"
     )
+    assert row["outputs"]["changed"] is True
+    assert row["source"]["changed"] is False
     anchor = row["thread_anchors"]["outputs"]
     thread_response = client.post(
         f"/api/reviews/{workspace['review']['id']}/threads",
@@ -862,7 +871,7 @@ def test_review_workspace_routes_persist_threads_notifications_and_snapshot_hist
         "summary"
     ]
     assert (
-        "Activity: reviewer created a thread on `analysis/notebook.ipynb`."
+        f"Activity: reviewer created a thread on `{REVIEW_WORKSPACE_THREAD_PATH}`."
         in fake_github.check_run_calls[-1]["summary"]
     )
 
@@ -888,7 +897,7 @@ def test_review_workspace_routes_persist_threads_notifications_and_snapshot_hist
         "summary"
     ]
     assert (
-        "Activity: pr-author replied to a thread on `analysis/notebook.ipynb`."
+        f"Activity: pr-author replied to a thread on `{REVIEW_WORKSPACE_THREAD_PATH}`."
         in fake_github.check_run_calls[-1]["summary"]
     )
 
@@ -901,7 +910,7 @@ def test_review_workspace_routes_persist_threads_notifications_and_snapshot_hist
         "summary"
     ]
     assert (
-        "Activity: reviewer resolved the thread on `analysis/notebook.ipynb`."
+        f"Activity: reviewer resolved the thread on `{REVIEW_WORKSPACE_THREAD_PATH}`."
         in fake_github.check_run_calls[-1]["summary"]
     )
     second_resolve_response = client.post(f"/api/threads/{thread['id']}/resolve")
@@ -915,7 +924,7 @@ def test_review_workspace_routes_persist_threads_notifications_and_snapshot_hist
         "summary"
     ]
     assert (
-        "Activity: reviewer reopened the thread on `analysis/notebook.ipynb`."
+        f"Activity: reviewer reopened the thread on `{REVIEW_WORKSPACE_THREAD_PATH}`."
         in fake_github.check_run_calls[-1]["summary"]
     )
     second_reopen_response = client.post(f"/api/threads/{thread['id']}/reopen")
@@ -1206,17 +1215,23 @@ def test_snapshot_worker_carries_forward_open_threads_and_marks_outdated_when_an
     fake_github = FakeManagedGitHubClient(
         files=[
             {
-                "filename": "analysis/notebook.ipynb",
+                "filename": REVIEW_WORKSPACE_THREAD_PATH,
                 "status": "modified",
                 "size": 2048,
             }
         ],
         contents={
-            ("analysis/notebook.ipynb", "base-sha"): review_thread_notebook("0.81"),
-            ("analysis/notebook.ipynb", "head-sha-1"): review_thread_notebook("0.73"),
-            ("analysis/notebook.ipynb", "head-sha-2"): review_thread_notebook("0.78"),
+            (REVIEW_WORKSPACE_THREAD_PATH, "base-sha"): fixture_text(
+                "review_workspace_thread_base.ipynb"
+            ),
+            (REVIEW_WORKSPACE_THREAD_PATH, "head-sha-1"): fixture_text(
+                "review_workspace_thread_head_v1.ipynb"
+            ),
+            (REVIEW_WORKSPACE_THREAD_PATH, "head-sha-2"): fixture_text(
+                "review_workspace_thread_head_v2.ipynb"
+            ),
             (
-                "analysis/notebook.ipynb",
+                REVIEW_WORKSPACE_THREAD_PATH,
                 "head-sha-3",
             ): json.dumps(
                 {
@@ -1254,6 +1269,11 @@ def test_snapshot_worker_carries_forward_open_threads_and_marks_outdated_when_an
                 id=101,
                 login="reviewer",
                 email="reviewer@example.test",
+            ),
+            "reviewer-2-token": GitHubOAuthUser(
+                id=303,
+                login="reviewer-2",
+                email="reviewer2@example.test",
             ),
             "author-token": GitHubOAuthUser(
                 id=202,
@@ -1297,6 +1317,12 @@ def test_snapshot_worker_carries_forward_open_threads_and_marks_outdated_when_an
         github_login="reviewer",
         access_token="reviewer-token",
     )
+    reviewer_two_session = create_user_session(
+        settings,
+        github_user_id=303,
+        github_login="reviewer-2",
+        access_token="reviewer-2-token",
+    )
     create_user_session(
         settings,
         github_user_id=202,
@@ -1306,11 +1332,15 @@ def test_snapshot_worker_carries_forward_open_threads_and_marks_outdated_when_an
 
     client.cookies.set(SESSION_COOKIE_NAME, reviewer_session)
     workspace = client.get("/api/reviews/octo-org/notebooklens/pulls/7").json()
+    notebook = workspace["snapshot"]["payload"]["review"]["notebooks"][0]
+    assert notebook["path"] == REVIEW_WORKSPACE_THREAD_PATH
     row = next(
         item
-        for item in workspace["snapshot"]["payload"]["review"]["notebooks"][0]["render_rows"]
-        if item["outputs"]["changed"]
+        for item in notebook["render_rows"]
+        if item["locator"]["cell_id"] == "metric-cell"
     )
+    assert row["outputs"]["changed"] is True
+    assert row["source"]["changed"] is False
     create_response = client.post(
         f"/api/reviews/{workspace['review']['id']}/threads",
         json={
@@ -1321,6 +1351,13 @@ def test_snapshot_worker_carries_forward_open_threads_and_marks_outdated_when_an
     )
     assert create_response.status_code == 201
     thread_id = create_response.json()["thread"]["id"]
+    client.cookies.set(SESSION_COOKIE_NAME, reviewer_two_session)
+    reply_response = client.post(
+        f"/api/threads/{thread_id}/messages",
+        json={"body_markdown": "The output still needs narrative context for the regression."},
+    )
+    assert reply_response.status_code == 201
+    assert len(reply_response.json()["thread"]["messages"]) == 2
 
     second_payload = pull_request_payload(action="synchronize", head_sha="head-sha-2")
     second_body = json.dumps(second_payload).encode("utf-8")
@@ -1355,8 +1392,16 @@ def test_snapshot_worker_carries_forward_open_threads_and_marks_outdated_when_an
     latest_workspace = client.get("/api/reviews/octo-org/notebooklens/pulls/7").json()
     assert latest_workspace["review"]["selected_snapshot_index"] == 2
     assert len(latest_workspace["threads"]) == 1
+    latest_notebook = latest_workspace["snapshot"]["payload"]["review"]["notebooks"][0]
+    latest_intro = next(
+        item
+        for item in latest_notebook["render_rows"]
+        if item["locator"]["cell_id"] == "intro-cell"
+    )
+    assert "train_v2.csv" in latest_intro["source"]["head"]
     origin_workspace = client.get("/api/reviews/octo-org/notebooklens/pulls/7/snapshots/1").json()
     assert len(origin_workspace["threads"]) == 1
+    assert len(origin_workspace["threads"][0]["messages"]) == 2
 
     third_payload = pull_request_payload(action="synchronize", head_sha="head-sha-3")
     third_body = json.dumps(third_payload).encode("utf-8")
