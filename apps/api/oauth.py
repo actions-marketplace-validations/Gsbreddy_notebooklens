@@ -10,7 +10,7 @@ import hmac
 import json
 import secrets
 from typing import Any, Iterable
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 import uuid
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -210,6 +210,23 @@ class GitHubOAuthClient:
             id=int(payload["id"]),
             login=payload["login"],
             email=payload.get("email"),
+        )
+
+    def can_access_repository(self, access_token: str, *, owner: str, repo: str) -> bool:
+        response = self.session.get(
+            f"{self.api_base_url}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {access_token}",
+            },
+            timeout=30,
+        )
+        if response.status_code in {200, 301, 302}:
+            return True
+        if response.status_code in {401, 403, 404}:
+            return False
+        raise OAuthStateError(
+            f"GitHub repository access lookup failed with status {response.status_code}"
         )
 
 

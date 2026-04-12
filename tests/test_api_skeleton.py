@@ -31,10 +31,14 @@ from apps.api.models import (
     InstallationRepository,
     ManagedReview,
     ManagedReviewStatus,
+    NotificationOutbox,
+    ReviewThread,
+    ReviewThreadStatus,
     ReviewSnapshot,
     ReviewSnapshotStatus,
     SnapshotBuildJob,
     SnapshotBuildJobStatus,
+    ThreadMessage,
     UserSession,
 )
 from apps.api.oauth import (
@@ -67,8 +71,25 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 class FakeOAuthClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        users_by_token: dict[str, GitHubOAuthUser] | None = None,
+        repo_access: dict[tuple[str, str, str], bool] | None = None,
+    ) -> None:
         self.exchange_calls: list[dict[str, Any]] = []
+        self.users_by_token = dict(
+            users_by_token
+            or {
+                "gho_test_token": GitHubOAuthUser(
+                    id=101,
+                    login="octocat",
+                    email="octocat@example.test",
+                )
+            }
+        )
+        self.repo_access = dict(repo_access or {})
+        self.repo_access_checks: list[tuple[str, str, str]] = []
 
     def build_authorize_url(self, *, client_id: str, redirect_uri: str, state: str, scopes=()):
         del scopes
@@ -91,8 +112,11 @@ class FakeOAuthClient:
         )
 
     def fetch_user(self, access_token: str):
-        assert access_token == "gho_test_token"
-        return GitHubOAuthUser(id=101, login="octocat")
+        return self.users_by_token[access_token]
+
+    def can_access_repository(self, access_token: str, *, owner: str, repo: str) -> bool:
+        self.repo_access_checks.append((access_token, owner, repo))
+        return self.repo_access.get((access_token, owner, repo), True)
 
 
 class FakeResponse:
@@ -207,6 +231,8 @@ def pull_request_payload(
     pull_number: int = 7,
     base_sha: str = "base-sha",
     head_sha: str = "head-sha",
+    author_id: int = 202,
+    author_login: str = "pr-author",
 ) -> dict[str, Any]:
     return {
         "action": action,
@@ -229,6 +255,10 @@ def pull_request_payload(
         },
         "pull_request": {
             "number": pull_number,
+            "user": {
+                "id": author_id,
+                "login": author_login,
+            },
             "base": {
                 "ref": "main",
                 "sha": base_sha,
@@ -238,6 +268,59 @@ def pull_request_payload(
             },
         },
     }
+
+
+def create_user_session(
+    settings: ApiSettings,
+    *,
+    github_user_id: int,
+    github_login: str,
+    access_token: str,
+    expires_at: datetime | None = None,
+) -> str:
+    with session_scope(settings) as db_session:
+        record = OAuthSessionStore(SessionTokenCipher(settings.session_secret)).create_session(
+            db_session,
+            github_user=GitHubOAuthUser(
+                id=github_user_id,
+                login=github_login,
+                email=None,
+            ),
+            access_token=access_token,
+            expires_at=expires_at or (datetime.now(timezone.utc) + timedelta(hours=8)),
+        )
+        return str(record.id)
+
+
+def review_thread_notebook(metric: str, *, explanation: str = "Baseline churn training.") -> str:
+    return json.dumps(
+        {
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "id": "intro-cell",
+                    "source": explanation,
+                    "metadata": {},
+                },
+                {
+                    "cell_type": "code",
+                    "id": "metric-cell",
+                    "source": "print('accuracy')",
+                    "metadata": {},
+                    "outputs": [
+                        {
+                            "output_type": "stream",
+                            "name": "stdout",
+                            "text": [f"accuracy = {metric}\n"],
+                        }
+                    ],
+                },
+            ],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+    )
 
 
 def test_api_settings_load_and_normalize_private_key(tmp_path: Path) -> None:
@@ -387,8 +470,11 @@ def test_managed_api_metadata_and_migration_scaffold_exist() -> None:
         "github_installations",
         "installation_repositories",
         "managed_reviews",
+        "notification_outbox",
         "snapshot_build_jobs",
+        "review_threads",
         "review_snapshots",
+        "thread_messages",
         "user_sessions",
     }
     assert expected_tables.issubset(set(Base.metadata.tables))
@@ -396,6 +482,9 @@ def test_managed_api_metadata_and_migration_scaffold_exist() -> None:
         "apps/api/alembic/versions/20260412_0001_create_managed_api_core_tables.py"
     )
     assert migration_path.exists()
+    assert Path(
+        "apps/api/alembic/versions/20260412_0002_add_review_threads_and_notifications.py"
+    ).exists()
 
 
 def test_fastapi_login_callback_logout_flow(tmp_path: Path) -> None:
@@ -479,7 +568,7 @@ def test_webhook_endpoint_queues_managed_snapshot_build(tmp_path: Path) -> None:
         assert review.latest_check_run_id == 9001
         assert job.status == SnapshotBuildJobStatus.QUEUED
 
-    assert client.get("/api/reviews/octo/notebooklens/pulls/7").status_code == 501
+    assert client.get("/api/reviews/octo/notebooklens/pulls/7").status_code == 401
     engine.dispose()
 
 
@@ -654,4 +743,359 @@ def test_snapshot_worker_marks_failed_and_preserves_last_ready_snapshot(tmp_path
     assert failed_call["conclusion"] == "action_required"
     assert "Latest snapshot status: `failed`" in failed_call["summary"]
     assert "Failure: boom while fetching analysis/notebook.ipynb@head-sha-2" in failed_call["summary"]
+    engine.dispose()
+
+
+def test_review_workspace_routes_persist_threads_notifications_and_snapshot_history(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    engine = get_engine(settings.database_url)
+    create_all_tables(engine)
+    app = create_app()
+    fake_github = FakeManagedGitHubClient(
+        files=[
+            {
+                "filename": "analysis/notebook.ipynb",
+                "status": "modified",
+                "size": 2048,
+            }
+        ],
+        contents={
+            ("analysis/notebook.ipynb", "base-sha"): review_thread_notebook("0.81"),
+            ("analysis/notebook.ipynb", "head-sha-1"): review_thread_notebook("0.73"),
+        },
+    )
+    fake_oauth = FakeOAuthClient(
+        users_by_token={
+            "reviewer-token": GitHubOAuthUser(
+                id=101,
+                login="reviewer",
+                email="reviewer@example.test",
+            ),
+            "author-token": GitHubOAuthUser(
+                id=202,
+                login="pr-author",
+                email="author@example.test",
+            ),
+        }
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_managed_github_client] = lambda: fake_github
+    app.dependency_overrides[get_oauth_client] = lambda: fake_oauth
+    client = TestClient(app)
+
+    payload = pull_request_payload(head_sha="head-sha-1")
+    body = json.dumps(payload).encode("utf-8")
+    response = client.post(
+        "/api/github/webhooks",
+        content=body,
+        headers={
+            "X-GitHub-Event": "pull_request",
+            "X-GitHub-Delivery": "delivery-1",
+            "X-Hub-Signature-256": sign_github_webhook("webhook-secret", body),
+            "Content-Type": "application/json",
+        },
+    )
+    assert response.status_code == 202
+
+    with session_scope(settings) as db_session:
+        result = run_snapshot_build_worker_once(
+            settings=settings,
+            db_session=db_session,
+            github_client=fake_github,
+        )
+        assert result.status == "succeeded"
+
+    reviewer_session = create_user_session(
+        settings,
+        github_user_id=101,
+        github_login="reviewer",
+        access_token="reviewer-token",
+    )
+    author_session = create_user_session(
+        settings,
+        github_user_id=202,
+        github_login="pr-author",
+        access_token="author-token",
+    )
+
+    client.cookies.set(SESSION_COOKIE_NAME, reviewer_session)
+    review_response = client.get("/api/reviews/octo-org/notebooklens/pulls/7")
+    assert review_response.status_code == 200
+    workspace = review_response.json()
+    assert workspace["review"]["selected_snapshot_index"] == 1
+    assert len(workspace["review"]["snapshot_history"]) == 1
+
+    row = next(
+        item
+        for item in workspace["snapshot"]["payload"]["review"]["notebooks"][0]["render_rows"]
+        if item["outputs"]["changed"]
+    )
+    anchor = row["thread_anchors"]["outputs"]
+    thread_response = client.post(
+        f"/api/reviews/{workspace['review']['id']}/threads",
+        json={
+            "snapshot_id": workspace["snapshot"]["id"],
+            "anchor": anchor,
+            "body_markdown": "Explain the regression and update the notebook narrative.",
+        },
+    )
+    assert thread_response.status_code == 201
+    thread = thread_response.json()["thread"]
+    assert thread["status"] == "open"
+    assert len(thread["messages"]) == 1
+
+    with session_scope(settings) as db_session:
+        stored_thread = db_session.scalars(select(ReviewThread)).one()
+        notifications = db_session.scalars(
+            select(NotificationOutbox).order_by(NotificationOutbox.created_at.asc())
+        ).all()
+        assert stored_thread.status == ReviewThreadStatus.OPEN
+        assert len(notifications) == 1
+        assert notifications[0].recipient_github_user_id == 202
+        assert notifications[0].recipient_email == "author@example.test"
+
+    client.cookies.set(SESSION_COOKIE_NAME, author_session)
+    reply_response = client.post(
+        f"/api/threads/{thread['id']}/messages",
+        json={"body_markdown": "I will update the narrative in the next push."},
+    )
+    assert reply_response.status_code == 201
+    assert len(reply_response.json()["thread"]["messages"]) == 2
+
+    client.cookies.set(SESSION_COOKIE_NAME, reviewer_session)
+    resolve_response = client.post(f"/api/threads/{thread['id']}/resolve")
+    assert resolve_response.status_code == 200
+    assert resolve_response.json()["thread"]["status"] == "resolved"
+    second_resolve_response = client.post(f"/api/threads/{thread['id']}/resolve")
+    assert second_resolve_response.status_code == 200
+    reopen_response = client.post(f"/api/threads/{thread['id']}/reopen")
+    assert reopen_response.status_code == 200
+    assert reopen_response.json()["thread"]["status"] == "open"
+    second_reopen_response = client.post(f"/api/threads/{thread['id']}/reopen")
+    assert second_reopen_response.status_code == 200
+    assert second_reopen_response.json()["thread"]["status"] == "open"
+
+    snapshot_response = client.get("/api/reviews/octo-org/notebooklens/pulls/7/snapshots/1")
+    assert snapshot_response.status_code == 200
+    assert len(snapshot_response.json()["threads"]) == 1
+
+    with session_scope(settings) as db_session:
+        messages = db_session.scalars(select(ThreadMessage).order_by(ThreadMessage.created_at.asc())).all()
+        notifications = db_session.scalars(
+            select(NotificationOutbox).order_by(NotificationOutbox.created_at.asc())
+        ).all()
+        assert len(messages) == 2
+        assert len(notifications) == 4
+        assert [item.event_type.value for item in notifications] == [
+            "thread_created",
+            "reply_added",
+            "thread_resolved",
+            "thread_reopened",
+        ]
+        assert notifications[1].recipient_github_user_id == 101
+        assert notifications[2].recipient_github_user_id == 202
+        assert notifications[3].recipient_github_user_id == 202
+
+    engine.dispose()
+
+
+def test_snapshot_worker_carries_forward_open_threads_and_marks_outdated_when_anchor_breaks(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    engine = get_engine(settings.database_url)
+    create_all_tables(engine)
+    app = create_app()
+    fake_github = FakeManagedGitHubClient(
+        files=[
+            {
+                "filename": "analysis/notebook.ipynb",
+                "status": "modified",
+                "size": 2048,
+            }
+        ],
+        contents={
+            ("analysis/notebook.ipynb", "base-sha"): review_thread_notebook("0.81"),
+            ("analysis/notebook.ipynb", "head-sha-1"): review_thread_notebook("0.73"),
+            ("analysis/notebook.ipynb", "head-sha-2"): review_thread_notebook("0.78"),
+            (
+                "analysis/notebook.ipynb",
+                "head-sha-3",
+            ): json.dumps(
+                {
+                    "cells": [
+                        {
+                            "cell_type": "markdown",
+                            "id": "intro-cell",
+                            "source": "Narrative updated for new dataset.",
+                            "metadata": {},
+                        },
+                        {
+                            "cell_type": "code",
+                            "id": "metric-cell",
+                            "source": "print('new accuracy')",
+                            "metadata": {},
+                            "outputs": [
+                                {
+                                    "output_type": "stream",
+                                    "name": "stdout",
+                                    "text": ["accuracy = 0.79\n"],
+                                }
+                            ],
+                        },
+                    ],
+                    "metadata": {},
+                    "nbformat": 4,
+                    "nbformat_minor": 5,
+                }
+            ),
+        },
+    )
+    fake_oauth = FakeOAuthClient(
+        users_by_token={
+            "reviewer-token": GitHubOAuthUser(
+                id=101,
+                login="reviewer",
+                email="reviewer@example.test",
+            ),
+            "author-token": GitHubOAuthUser(
+                id=202,
+                login="pr-author",
+                email="author@example.test",
+            ),
+        }
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_managed_github_client] = lambda: fake_github
+    app.dependency_overrides[get_oauth_client] = lambda: fake_oauth
+    client = TestClient(app)
+
+    first_payload = pull_request_payload(head_sha="head-sha-1")
+    first_body = json.dumps(first_payload).encode("utf-8")
+    assert (
+        client.post(
+            "/api/github/webhooks",
+            content=first_body,
+            headers={
+                "X-GitHub-Event": "pull_request",
+                "X-GitHub-Delivery": "delivery-1",
+                "X-Hub-Signature-256": sign_github_webhook("webhook-secret", first_body),
+                "Content-Type": "application/json",
+            },
+        ).status_code
+        == 202
+    )
+
+    with session_scope(settings) as db_session:
+        first_result = run_snapshot_build_worker_once(
+            settings=settings,
+            db_session=db_session,
+            github_client=fake_github,
+        )
+        assert first_result.status == "succeeded"
+
+    reviewer_session = create_user_session(
+        settings,
+        github_user_id=101,
+        github_login="reviewer",
+        access_token="reviewer-token",
+    )
+    create_user_session(
+        settings,
+        github_user_id=202,
+        github_login="pr-author",
+        access_token="author-token",
+    )
+
+    client.cookies.set(SESSION_COOKIE_NAME, reviewer_session)
+    workspace = client.get("/api/reviews/octo-org/notebooklens/pulls/7").json()
+    row = next(
+        item
+        for item in workspace["snapshot"]["payload"]["review"]["notebooks"][0]["render_rows"]
+        if item["outputs"]["changed"]
+    )
+    create_response = client.post(
+        f"/api/reviews/{workspace['review']['id']}/threads",
+        json={
+            "snapshot_id": workspace["snapshot"]["id"],
+            "anchor": row["thread_anchors"]["outputs"],
+            "body_markdown": "Explain the regression.",
+        },
+    )
+    assert create_response.status_code == 201
+    thread_id = create_response.json()["thread"]["id"]
+
+    second_payload = pull_request_payload(action="synchronize", head_sha="head-sha-2")
+    second_body = json.dumps(second_payload).encode("utf-8")
+    assert (
+        client.post(
+            "/api/github/webhooks",
+            content=second_body,
+            headers={
+                "X-GitHub-Event": "pull_request",
+                "X-GitHub-Delivery": "delivery-2",
+                "X-Hub-Signature-256": sign_github_webhook("webhook-secret", second_body),
+                "Content-Type": "application/json",
+            },
+        ).status_code
+        == 202
+    )
+    with session_scope(settings) as db_session:
+        second_result = run_snapshot_build_worker_once(
+            settings=settings,
+            db_session=db_session,
+            github_client=fake_github,
+        )
+        assert second_result.status == "succeeded"
+        thread = db_session.scalars(select(ReviewThread)).one()
+        latest_snapshot = db_session.scalars(
+            select(ReviewSnapshot).where(ReviewSnapshot.snapshot_index == 2)
+        ).one()
+        assert thread.status == ReviewThreadStatus.OPEN
+        assert thread.carried_forward is True
+        assert thread.current_snapshot_id == latest_snapshot.id
+
+    latest_workspace = client.get("/api/reviews/octo-org/notebooklens/pulls/7").json()
+    assert latest_workspace["review"]["selected_snapshot_index"] == 2
+    assert len(latest_workspace["threads"]) == 1
+    origin_workspace = client.get("/api/reviews/octo-org/notebooklens/pulls/7/snapshots/1").json()
+    assert len(origin_workspace["threads"]) == 1
+
+    third_payload = pull_request_payload(action="synchronize", head_sha="head-sha-3")
+    third_body = json.dumps(third_payload).encode("utf-8")
+    assert (
+        client.post(
+            "/api/github/webhooks",
+            content=third_body,
+            headers={
+                "X-GitHub-Event": "pull_request",
+                "X-GitHub-Delivery": "delivery-3",
+                "X-Hub-Signature-256": sign_github_webhook("webhook-secret", third_body),
+                "Content-Type": "application/json",
+            },
+        ).status_code
+        == 202
+    )
+    with session_scope(settings) as db_session:
+        third_result = run_snapshot_build_worker_once(
+            settings=settings,
+            db_session=db_session,
+            github_client=fake_github,
+        )
+        assert third_result.status == "succeeded"
+        thread = db_session.scalars(select(ReviewThread)).one()
+        latest_snapshot = db_session.scalars(
+            select(ReviewSnapshot).where(ReviewSnapshot.snapshot_index == 3)
+        ).one()
+        assert thread.id.hex
+        assert thread.status == ReviewThreadStatus.OUTDATED
+        assert thread.current_snapshot_id != latest_snapshot.id
+
+    latest_workspace = client.get("/api/reviews/octo-org/notebooklens/pulls/7").json()
+    assert latest_workspace["review"]["selected_snapshot_index"] == 3
+    assert latest_workspace["threads"] == []
+    origin_workspace = client.get("/api/reviews/octo-org/notebooklens/pulls/7/snapshots/1").json()
+    assert origin_workspace["threads"][0]["id"] == thread_id
+    assert origin_workspace["threads"][0]["status"] == "outdated"
+
     engine.dispose()

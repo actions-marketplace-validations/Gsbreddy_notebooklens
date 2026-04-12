@@ -33,6 +33,7 @@ from .models import (
     SnapshotBuildJob,
     SnapshotBuildJobStatus,
 )
+from .review_workspace import ThreadCounts, carry_forward_open_threads
 from .reviewer_guidance import (
     NotebookLensConfigError,
     ReviewerPlaybook,
@@ -62,6 +63,8 @@ class PullRequestWebhook:
     full_name: str
     private: bool
     pull_number: int
+    pull_author_github_user_id: int | None
+    pull_author_login: str | None
     base_branch: str
     base_sha: str
     head_sha: str
@@ -90,15 +93,6 @@ class SnapshotBuildResult:
     snapshot_index: int | None
     check_run_id: int | None
     reused_snapshot: bool = False
-
-
-@dataclass(frozen=True)
-class ThreadCounts:
-    """Thread counts included in managed check-run summaries."""
-
-    unresolved: int = 0
-    resolved: int = 0
-    outdated: int = 0
 
 
 def ingest_pull_request_webhook(
@@ -353,6 +347,11 @@ def run_snapshot_build_worker_once(
         snapshot.failure_reason = None
 
         if _job_matches_latest_review(review=review, job=job):
+            carry_forward_open_threads(
+                db_session=db_session,
+                review=review,
+                snapshot=snapshot,
+            )
             review.status = ManagedReviewStatus.READY
             review.latest_snapshot_id = snapshot.id
             details_url = _build_review_url(
@@ -487,6 +486,8 @@ def parse_pull_request_webhook(
         full_name=full_name,
         private=bool(repository.get("private", False)),
         pull_number=_require_int(payload, "number"),
+        pull_author_github_user_id=_optional_int(pull_request.get("user"), "id"),
+        pull_author_login=_optional_str(pull_request.get("user"), "login"),
         base_branch=_require_str(base, "ref"),
         base_sha=_require_str(base, "sha"),
         head_sha=_require_str(head, "sha"),
@@ -551,6 +552,8 @@ def _upsert_review_state(
             owner=webhook.owner,
             repo=webhook.repo,
             pull_number=webhook.pull_number,
+            pull_author_github_user_id=webhook.pull_author_github_user_id,
+            pull_author_login=webhook.pull_author_login,
             base_branch=webhook.base_branch,
             latest_base_sha=webhook.base_sha,
             latest_head_sha=webhook.head_sha,
@@ -565,6 +568,8 @@ def _upsert_review_state(
         review.owner = webhook.owner
         review.repo = webhook.repo
         review.base_branch = webhook.base_branch
+        review.pull_author_github_user_id = webhook.pull_author_github_user_id
+        review.pull_author_login = webhook.pull_author_login
         review.latest_base_sha = webhook.base_sha
         review.latest_head_sha = webhook.head_sha
         review.status = ManagedReviewStatus.PENDING
@@ -902,6 +907,18 @@ def _require_int(payload: Mapping[str, Any], key: str) -> int:
     if isinstance(value, int):
         return value
     raise ManagedWebhookPayloadError(f"GitHub webhook payload is missing `{key}`")
+
+
+def _optional_int(payload: Mapping[str, Any] | Any, key: str) -> int | None:
+    value = payload.get(key) if isinstance(payload, Mapping) else None
+    return value if isinstance(value, int) else None
+
+
+def _optional_str(payload: Mapping[str, Any] | Any, key: str) -> str | None:
+    value = payload.get(key) if isinstance(payload, Mapping) else None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 __all__ = [

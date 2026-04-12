@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -23,6 +24,16 @@ from ..oauth import (
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+@dataclass(frozen=True)
+class AuthenticatedUser:
+    """Authenticated GitHub user session details for managed review routes."""
+
+    session_id: str
+    github_user_id: int
+    github_login: str
+    access_token: str
 
 
 def get_oauth_client() -> GitHubOAuthClient:
@@ -127,3 +138,29 @@ def logout(
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
     response.status_code = 204
     return response
+
+
+def require_authenticated_user(
+    db_session: Session = Depends(get_db_session),
+    session_store: OAuthSessionStore = Depends(get_session_store),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> AuthenticatedUser:
+    """Resolve and validate the signed-in user from the managed session cookie."""
+    if session_cookie is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    session_record = session_store.get_session(db_session, session_cookie)
+    if session_record is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    expires_at = session_record.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        session_store.delete_session(db_session, session_record.id)
+        db_session.commit()
+        raise HTTPException(status_code=401, detail="Session expired")
+    return AuthenticatedUser(
+        session_id=str(session_record.id),
+        github_user_id=session_record.github_user_id,
+        github_login=session_record.github_login,
+        access_token=session_store.cipher.decrypt(session_record.access_token_encrypted),
+    )

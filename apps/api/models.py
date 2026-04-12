@@ -88,6 +88,25 @@ class ReviewSnapshotStatus(str, Enum):
     FAILED = "failed"
 
 
+class ReviewThreadStatus(str, Enum):
+    OPEN = "open"
+    RESOLVED = "resolved"
+    OUTDATED = "outdated"
+
+
+class NotificationEventType(str, Enum):
+    THREAD_CREATED = "thread_created"
+    REPLY_ADDED = "reply_added"
+    THREAD_RESOLVED = "thread_resolved"
+    THREAD_REOPENED = "thread_reopened"
+
+
+class NotificationDeliveryState(str, Enum):
+    PENDING = "pending"
+    SENT = "sent"
+    FAILED = "failed"
+
+
 class GitHubInstallation(TimestampMixin, Base):
     __tablename__ = "github_installations"
 
@@ -148,6 +167,8 @@ class ManagedReview(TimestampMixin, Base):
     base_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     latest_base_sha: Mapped[str] = mapped_column(String(255), nullable=False)
     latest_head_sha: Mapped[str] = mapped_column(String(255), nullable=False)
+    pull_author_github_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    pull_author_login: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[ManagedReviewStatus] = mapped_column(
         SqlEnum(ManagedReviewStatus, native_enum=False),
         default=ManagedReviewStatus.PENDING,
@@ -167,6 +188,10 @@ class ManagedReview(TimestampMixin, Base):
         cascade="all, delete-orphan",
     )
     review_snapshots: Mapped[list["ReviewSnapshot"]] = relationship(
+        back_populates="managed_review",
+        cascade="all, delete-orphan",
+    )
+    review_threads: Mapped[list["ReviewThread"]] = relationship(
         back_populates="managed_review",
         cascade="all, delete-orphan",
     )
@@ -235,6 +260,123 @@ class ReviewSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     managed_review: Mapped[ManagedReview] = relationship(back_populates="review_snapshots")
+    origin_threads: Mapped[list["ReviewThread"]] = relationship(
+        back_populates="origin_snapshot",
+        foreign_keys="ReviewThread.origin_snapshot_id",
+    )
+    current_threads: Mapped[list["ReviewThread"]] = relationship(
+        back_populates="current_snapshot",
+        foreign_keys="ReviewThread.current_snapshot_id",
+    )
+
+
+class ReviewThread(TimestampMixin, Base):
+    __tablename__ = "review_threads"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    managed_review_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("managed_reviews.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    origin_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("review_snapshots.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    current_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("review_snapshots.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    anchor_json: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    status: Mapped[ReviewThreadStatus] = mapped_column(
+        SqlEnum(ReviewThreadStatus, native_enum=False),
+        default=ReviewThreadStatus.OPEN,
+        nullable=False,
+    )
+    carried_forward: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_by_github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by_github_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    managed_review: Mapped[ManagedReview] = relationship(back_populates="review_threads")
+    origin_snapshot: Mapped[ReviewSnapshot] = relationship(
+        back_populates="origin_threads",
+        foreign_keys=[origin_snapshot_id],
+    )
+    current_snapshot: Mapped[ReviewSnapshot] = relationship(
+        back_populates="current_threads",
+        foreign_keys=[current_snapshot_id],
+    )
+    messages: Mapped[list["ThreadMessage"]] = relationship(
+        back_populates="thread",
+        cascade="all, delete-orphan",
+        order_by="ThreadMessage.created_at",
+    )
+    notifications: Mapped[list["NotificationOutbox"]] = relationship(
+        back_populates="thread",
+        cascade="all, delete-orphan",
+        order_by="NotificationOutbox.created_at",
+    )
+
+
+Index(
+    "ix_review_threads_managed_review_id_status",
+    ReviewThread.managed_review_id,
+    ReviewThread.status,
+)
+Index(
+    "ix_review_threads_current_snapshot_id_status",
+    ReviewThread.current_snapshot_id,
+    ReviewThread.status,
+)
+
+
+class ThreadMessage(Base):
+    __tablename__ = "thread_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("review_threads.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    author_github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    author_login: Mapped[str] = mapped_column(String(255), nullable=False)
+    body_markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    thread: Mapped[ReviewThread] = relationship(back_populates="messages")
+
+
+class NotificationOutbox(Base):
+    __tablename__ = "notification_outbox"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("review_threads.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    event_type: Mapped[NotificationEventType] = mapped_column(
+        SqlEnum(NotificationEventType, native_enum=False),
+        nullable=False,
+    )
+    recipient_github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    recipient_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    delivery_state: Mapped[NotificationDeliveryState] = mapped_column(
+        SqlEnum(NotificationDeliveryState, native_enum=False),
+        default=NotificationDeliveryState.PENDING,
+        nullable=False,
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    thread: Mapped[ReviewThread] = relationship(back_populates="notifications")
 
 
 class UserSession(Base):
@@ -256,10 +398,16 @@ __all__ = [
     "InstallationRepository",
     "ManagedReview",
     "ManagedReviewStatus",
+    "NotificationDeliveryState",
+    "NotificationEventType",
+    "NotificationOutbox",
+    "ReviewThread",
+    "ReviewThreadStatus",
     "ReviewSnapshot",
     "ReviewSnapshotStatus",
     "SnapshotBuildJob",
     "SnapshotBuildJobStatus",
+    "ThreadMessage",
     "UserSession",
     "utcnow",
 ]
