@@ -1,0 +1,35 @@
+"""FastAPI entrypoint for the managed NotebookLens API."""
+
+from __future__ import annotations
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from .config import ApiConfigurationError
+from .routes.auth import router as auth_router
+from .routes.github import router as github_router
+from .routes.health import router as health_router
+from .routes.reviews import router as reviews_router
+from .webhooks import GitHubWebhookVerificationError
+
+
+def create_app() -> FastAPI:
+    """Create the managed NotebookLens FastAPI application."""
+    app = FastAPI(title="NotebookLens Managed API", version="0.3.0-beta")
+    app.include_router(health_router)
+    app.include_router(github_router)
+    app.include_router(auth_router)
+    app.include_router(reviews_router)
+
+    @app.exception_handler(ApiConfigurationError)
+    async def handle_configuration_error(_: Request, exc: ApiConfigurationError) -> JSONResponse:
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+    @app.exception_handler(GitHubWebhookVerificationError)
+    async def handle_webhook_error(_: Request, exc: GitHubWebhookVerificationError) -> JSONResponse:
+        return JSONResponse(status_code=401, content={"detail": str(exc)})
+
+    return app
+
+
+app = create_app()
