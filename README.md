@@ -3,16 +3,28 @@
 
 Notebook-aware pull request review for Jupyter notebooks on GitHub. NotebookLens ships as two separate products that can coexist on the same PR: an OSS GitHub Action that posts one auto-updating PR comment with notebook-local reviewer guidance and optional Claude AI summaries, and an optional hosted review workspace beta that opens from a dedicated check run for notebook-aware diffs and inline threads.
 
-| Product | Enable it by | GitHub surface | What it does |
-|---|---|---|---|
-| OSS Action | Add `Gsbreddy/notebooklens@v0` to a workflow | Sticky PR comment keyed by `<!-- notebooklens-comment -->` | Summarizes notebook changes, flagged findings, and optional Claude output |
-| Hosted Review Workspace Beta | Install the NotebookLens GitHub App and sign in with GitHub OAuth | Dedicated `NotebookLens Review Workspace` check run | Opens a managed PR review workspace with snapshot history, inline threads, GitHub PR sync, and a supported Docker Compose self-hosting path |
+## Start Here
+
+If you are evaluating NotebookLens for the first time, start with the OSS Action.
+
+- Use the **OSS Action** if you want the fastest path to notebook-aware PR review inside GitHub. It takes a few minutes to install, works with `ai-provider: none`, and gives you one sticky PR comment with notebook change summaries and reviewer guidance.
+- Use the **Hosted Review Workspace Beta** if your DS/ML team wants a deeper review surface with snapshot history, visual notebook diffs, inline threads, GitHub PR sync, and a supported self-hosting path.
+- Use **both** if you want a lightweight PR summary comment and a separate hosted review experience on the same pull request. They keep separate GitHub surfaces and separate onboarding.
 
 The Action and the GitHub App have separate onboarding and separate GitHub surfaces. If both are enabled on the same PR, the Action keeps owning the sticky comment and the App keeps owning the dedicated check run. `.github/notebooklens.yml` remains shared review config for both.
 
+## Choose Your Path
+
+| Product | Enable it by | GitHub surface | What it does |
+|---|---|---|---|
+| OSS Action | Add `Gsbreddy/notebooklens@v0` to a workflow | Sticky PR comment keyed by `<!-- notebooklens-comment -->` | Recommended first install for most teams. Summarizes notebook changes, flagged findings, and optional Claude output. |
+| Hosted Review Workspace Beta | Install the NotebookLens GitHub App and sign in with GitHub OAuth | Dedicated `NotebookLens Review Workspace` check run | Separate beta workflow for deeper review: managed notebook diffs, inline threads, GitHub PR sync, and a supported Docker Compose self-hosting path. |
+
+Pick the Action first if your goal is "show me notebook-aware review inside GitHub quickly." Pick the hosted workspace beta when the team needs a richer review loop than a PR comment can provide.
+
 ## OSS Action Quick Start
 
-Use this first. It needs no AI key, sends nothing to external model providers, and still includes built-in reviewer guidance for changed notebooks.
+Recommended first install for most teams. It needs no AI key, sends nothing to external model providers in `none` mode, and still includes built-in reviewer guidance for changed notebooks.
 
 ```yaml
 name: NotebookLens
@@ -44,7 +56,9 @@ jobs:
 
 `GITHUB_TOKEN` is the built-in Actions token used to read PR file metadata and create or update the review comment. No extra setup is required — GitHub provides it automatically in every workflow run.
 
-## Hosted Review Workspace Beta
+After install, NotebookLens adds one sticky PR comment. That comment is the entire OSS Action surface: it updates in place on new pushes, includes reviewer guidance even in `none` mode, and optionally includes Claude output when enabled.
+
+## Hosted Review Workspace Beta Quick Start
 
 The managed `v0.4.0-beta` workspace is a separate GitHub App + web app flow. It does not replace the OSS Action, and it does not add new public Action `with:` inputs.
 
@@ -69,6 +83,22 @@ Installation admins can now configure an installation-scoped LiteLLM gateway for
 Hosted thread activity now mirrors into GitHub pull requests when NotebookLens can map the hosted anchor to a stable `.ipynb` diff position. The managed workspace remains the editable source of truth, and unmappable anchors fall back to the app-owned workspace comment on the PR discussion tab.
 
 To keep the hosted UI fast and stable across pushes, NotebookLens stores versioned normalized review snapshots per PR revision for 90 days by default. Those snapshots include changed-cell source text, limited neighboring context, output and metadata summaries, deterministic findings, reviewer guidance, and stable thread anchors. NotebookLens does not store untouched full notebook revisions wholesale for the hosted beta.
+
+## What You'll See
+
+If you install the OSS Action, reviewers will see:
+
+- one sticky NotebookLens comment on the pull request
+- notebook-local summaries of changed cells, outputs, notices, and reviewer guidance
+- optional Claude summary output when `ai-provider: claude` succeeds
+
+If you enable the hosted workspace beta, reviewers will also see:
+
+- a dedicated `NotebookLens Review Workspace` check run
+- an `Open in NotebookLens` link into the hosted review UI
+- snapshot history, notebook-aware diffs, inline threads, and GitHub PR sync for hosted thread activity
+
+The two surfaces are complementary, not duplicates: the Action is the lightweight GitHub-native summary path, and the hosted workspace beta is the deeper collaborative review path.
 
 ## Enable Claude (optional)
 
