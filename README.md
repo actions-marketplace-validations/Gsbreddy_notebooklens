@@ -1,11 +1,11 @@
 # NotebookLens
 [![pytest](https://github.com/Gsbreddy/notebooklens/actions/workflows/ci.yml/badge.svg)](https://github.com/Gsbreddy/notebooklens/actions/workflows/ci.yml)
 
-GitHub Action for Jupyter notebook PR review. Detects `.ipynb` changes, diffs cells, and posts one auto-updating PR comment — with optional Claude AI summaries. No checkout required. `none` mode needs no external AI key.
+GitHub Action for Jupyter notebook PR review. Detects `.ipynb` changes, diffs cells, and posts one auto-updating PR comment with notebook-local reviewer guidance and optional Claude AI summaries. No checkout required. `none` mode needs no external AI key.
 
 ## Quick Start
 
-Use this first. It needs no AI key and sends nothing to external model providers.
+Use this first. It needs no AI key, sends nothing to external model providers, and still includes built-in reviewer guidance for changed notebooks.
 
 ```yaml
 name: NotebookLens
@@ -53,7 +53,7 @@ After `none` mode is useful for your PR triage flow, enable Claude for richer su
     redact-emails: true
 ```
 
-If `ai-provider=claude` is requested without a key, or Claude fails, the run degrades safely to `none` mode and adds a visible notice in the PR comment.
+If `ai-provider=claude` is requested without a key, or Claude fails, the run degrades safely to `none` mode and adds a visible notice in the PR comment. Deterministic reviewer guidance still runs in the fallback path.
 
 **Fork PRs:** When a PR originates from a fork, GitHub Actions does not expose repository secrets to the workflow. If `ai-provider: claude` is configured but the fork provides no `ai-api-key`, NotebookLens automatically falls back to `none` mode and adds a visible notice in the PR comment. No manual handling is needed.
 
@@ -76,6 +76,11 @@ Reviewed **2** notebook(s) with **5** changed cell(s).
 - Cell 2 · `code` · `modified` · cell modified (source) Output updates: text stream output updated (42 chars)
 - Cell 4 · `code` · `added` · cell added
 - Cell 7 · `code` · `moved` · cell reordered without material content changes
+
+##### Reviewer Guidance
+- Review the changed outputs and confirm the updated results are intentional.
+- Training notebooks: Verify the dataset split and random seed changes are intentional.
+
 - Notebook notices: notebook material metadata changed (kernelspec/language_info)
 
 #### `reports/summary.ipynb` (`added`)
@@ -95,7 +100,7 @@ Model training cell updated with new learning rate parameter. Output confirms lo
 </details>
 ```
 
-The `<details>` block with the AI summary appears only when `ai-provider: claude` succeeds. Notebook-local notices are rendered inline under the affected notebook. The `### Notices` section appears only when there are global limit-related or processing notices.
+The `<details>` block with the AI summary appears only when `ai-provider: claude` succeeds. `##### Reviewer Guidance` appears only for notebooks that have at least one guidance item. Notebook-local notices are rendered inline under the affected notebook. The `### Notices` section appears only when there are global limit-related or processing notices, including invalid `.github/notebooklens.yml` warnings.
 
 ## How It Works
 
@@ -113,7 +118,7 @@ NotebookLens runs as a Docker GitHub Action triggered only on `pull_request` eve
 
 5. **Redaction** — Before any external call, applies five pattern families: URI credentials (`scheme://user:pass@host`), connection strings (postgres/mysql/etc.), sensitive assignments (`TOKEN=`, `API_KEY=`, etc.), long base64 blobs, and (if enabled) email addresses.
 
-6. **Review** — In `none` mode: deterministic findings only, no external calls. In `claude` mode: sends redacted diff JSON to `claude-3-5-sonnet-latest`; validates strict JSON response schema; attempts one JSON repair pass on failure; falls back to `none` with a visible notice if repair also fails.
+6. **Review** — In `none` mode: deterministic findings plus built-in reviewer guidance, no external calls. If `.github/notebooklens.yml` exists in the PR head revision, matching playbook prompts are merged into the same notebook-local guidance sections. In `claude` mode: sends redacted diff JSON plus the already-derived deterministic/config guidance to `claude-3-5-sonnet-latest`; validates strict JSON response schema; attempts one JSON repair pass on failure; falls back to `none` with a visible notice if repair also fails.
 
 7. **Comment sync** — Creates, updates, or deletes exactly one bot-authored PR comment identified by the HTML marker `<!-- notebooklens-comment -->`. If notebook changes disappear from a later commit, the comment is deleted automatically.
 
@@ -148,6 +153,33 @@ Give the action step an `id` such as `id: notebooklens` if you want to read outp
 
 **Out of scope for v0.1.0:** OpenAI/Ollama providers, GitLab/Bitbucket, hosted review UI, inline notebook threads.
 
+## Reviewer Guidance Playbooks
+
+NotebookLens always generates built-in reviewer guidance in `none` mode for high-signal notebook changes. No config file is required.
+
+You can add repo-specific prompts by committing `.github/notebooklens.yml`:
+
+```yaml
+version: 1
+reviewer_guidance:
+  playbooks:
+    - name: Training notebooks
+      paths:
+        - "notebooks/training/**/*.ipynb"
+      prompts:
+        - "Verify the dataset split and random seed changes are intentional."
+        - "Check whether metric changes are explained in markdown or the PR description."
+```
+
+How config is applied:
+- `.github/notebooklens.yml` is optional. If it is missing, NotebookLens uses built-in guidance only.
+- NotebookLens reads the config from the PR head revision, so config changes in the same PR are previewed immediately.
+- For fork PRs, the head revision is still used, so playbooks from the forked branch participate in guidance generation when present.
+- For renamed notebooks, playbook matching uses the current head path.
+- If the config file is malformed or fails validation, NotebookLens ignores the playbooks, keeps built-in guidance active, and adds one visible notice to the PR comment.
+
+Playbooks do not add new action inputs. They live entirely in `.github/notebooklens.yml`.
+
 ## Hard Limits
 
 | Limit | Value |
@@ -162,7 +194,7 @@ Notebook-size and aligned-cell limits are surfaced as notices in the PR comment 
 
 ## What `none` Mode Detects
 
-In `none` mode, NotebookLens applies four deterministic checks across notebook-level metadata and changed cells. No external calls are made.
+In `none` mode, NotebookLens applies four deterministic checks across notebook-level metadata and changed cells, and it also emits built-in reviewer guidance for high-signal notebook changes. No external calls are made.
 
 | Code | Category | Severity | Condition |
 |---|---|---|---|
@@ -171,7 +203,7 @@ In `none` mode, NotebookLens applies four deterministic checks across notebook-l
 | `error_output_present` | error | medium | A changed cell has an error-type output. |
 | `large_output_change` | output | low | A changed cell has output content that exceeded the 2,000-character AI forwarding limit. |
 
-Claude mode includes all of the above plus AI-generated findings across the full issue schema (`documentation`, `output`, `error`, `data`, `metadata`, `policy`, `review_guidance`).
+Claude mode includes all of the above plus AI-generated findings and optional AI-added reviewer guidance.
 
 ## Privacy Note
 
@@ -235,6 +267,12 @@ Unsupported events do not emit `notebooklens.comment_sync` because comment sync 
 - Check `ai-provider` is exactly `claude`.
 - Check `ai-api-key` is present and valid.
 - For fork PRs, secret availability may be restricted; fallback to `none` is expected and is surfaced in notices.
+
+`Reviewer playbooks did not apply`
+- Confirm the file path is exactly `.github/notebooklens.yml`.
+- Confirm the file validates against the expected shape: `version: 1`, optional `reviewer_guidance.playbooks`, and non-empty `name`, `paths`, and `prompts` fields for each playbook.
+- NotebookLens reads the config from the PR head revision, so renamed notebooks match against the current head path and fork PRs use the fork-side config.
+- If the config is malformed, NotebookLens ignores playbooks and shows one visible notice while keeping built-in guidance enabled.
 
 `Existing NotebookLens comment did not update as expected`
 - NotebookLens only updates/deletes marker comments it owns (bot-authored comment containing `<!-- notebooklens-comment -->`).

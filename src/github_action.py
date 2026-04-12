@@ -9,17 +9,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Protocol, Sequence, Tuple
+import yaml
 
 from .claude_integration import (
     ProviderConfig,
     ProviderInterface,
     ProviderName,
     ProviderRunMetadata,
+    build_base_reviewer_guidance,
     build_provider,
 )
 from .diff_engine import DiffLimits, NotebookDiff, NotebookInput, ReviewResult, build_notebook_diff
@@ -29,17 +31,33 @@ from .github_api import CommentSyncResult, GitHubApiClient, claude_succeeded_fro
 SUPPORTED_EVENT_NAME = "pull_request"
 SUPPORTED_EVENT_ACTIONS = {"opened", "synchronize", "reopened"}
 NOTEBOOK_EXTENSION = ".ipynb"
+CONFIG_FILE_PATH = ".github/notebooklens.yml"
 
 
 @dataclass(frozen=True)
 class PullRequestContext:
     repository: str
+    base_repository: str
+    head_repository: str
     pull_number: int
     base_sha: str
     head_sha: str
     is_fork: bool
     event_name: str
     event_action: str
+
+
+@dataclass(frozen=True)
+class ReviewerPlaybookConfig:
+    name: str
+    paths: Tuple[str, ...]
+    prompts: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class NotebookLensConfig:
+    version: int
+    reviewer_playbooks: Tuple[ReviewerPlaybookConfig, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -83,6 +101,9 @@ class ActionRunResult:
     review_result: Optional[ReviewResult]
     notices: List[str]
     metadata: ActionRunMetadata
+    config_content: Optional[str]
+    config: Optional[NotebookLensConfig]
+    config_notices: List[str] = field(default_factory=list)
 
 
 class GitHubNotebookApiClient(Protocol):
@@ -159,8 +180,15 @@ def load_pull_request_context(
     if head_repo_full_name:
         is_fork = is_fork or (head_repo_full_name != repository)
 
+    base_repo_full_name = _read_nested_str(payload, ("pull_request", "base", "repo", "full_name"))
+    if not base_repo_full_name:
+        base_repo_full_name = repository
+    head_repo_full_name = head_repo_full_name or repository
+
     return PullRequestContext(
         repository=repository,
+        base_repository=base_repo_full_name,
+        head_repository=head_repo_full_name,
         pull_number=pull_number,
         base_sha=base_sha,
         head_sha=head_sha,
@@ -203,10 +231,20 @@ def run_action(
             review_result=None,
             notices=[reason],
             metadata=_metadata_for_skip(action_inputs),
+            config_content=None,
+            config=None,
+            config_notices=[],
         )
         if emit_logs:
             log_run_result(result)
         return result
+
+    config_content, config_notices = _fetch_notebooklens_config(
+        github_api=github_api,
+        context=pr_context,
+    )
+    parsed_config, parse_notices = _parse_notebooklens_config(config_content)
+    config_notices.extend(parse_notices)
 
     raw_files = github_api.list_pull_request_files(
         repository=pr_context.repository,
@@ -218,6 +256,8 @@ def run_action(
 
     if not notebook_files:
         reason = "No changed .ipynb files in pull request; exiting without review output."
+        notices = list(config_notices)
+        notices.append(reason)
         result = ActionRunResult(
             status="no_notebook_changes",
             skip_reason=reason,
@@ -225,8 +265,11 @@ def run_action(
             changed_notebook_paths=[],
             notebook_diff=None,
             review_result=None,
-            notices=[reason],
+            notices=notices,
             metadata=_metadata_for_skip(action_inputs),
+            config_content=config_content,
+            config=parsed_config,
+            config_notices=list(config_notices),
         )
         if emit_logs:
             log_run_result(result)
@@ -240,9 +283,14 @@ def run_action(
     )
 
     notebook_diff = build_notebook_diff(notebook_inputs, limits=limits)
+    base_reviewer_guidance = build_base_reviewer_guidance(
+        notebook_diff,
+        parsed_config.reviewer_playbooks if parsed_config is not None else (),
+    )
     provider, requested_provider, selected_provider, provider_notices = _resolve_provider(
         context=pr_context,
         inputs=action_inputs,
+        base_reviewer_guidance=base_reviewer_guidance,
         provider_factory=provider_factory,
     )
 
@@ -250,7 +298,7 @@ def run_action(
     provider_meta = provider.last_run_metadata
     runtime_effective_provider = "none" if provider_meta.used_fallback else selected_provider
 
-    notices = []
+    notices = list(config_notices)
     notices.extend(discovery_notices)
     notices.extend(provider_notices)
     if provider_meta.used_fallback and provider_meta.fallback_reason:
@@ -290,6 +338,9 @@ def run_action(
         review_result=review_result,
         notices=list(notebook_diff.notices),
         metadata=metadata,
+        config_content=config_content,
+        config=parsed_config,
+        config_notices=list(config_notices),
     )
     if emit_logs:
         log_run_result(result)
@@ -394,7 +445,7 @@ def _build_notebook_inputs(
         if should_fetch_content and selection.base_path is not None and not skip_head_for_size:
             base_content, base_notice = _safe_fetch_file_content(
                 github_api=github_api,
-                repository=context.repository,
+                repository=context.base_repository,
                 path=selection.base_path,
                 ref=context.base_sha,
             )
@@ -404,7 +455,7 @@ def _build_notebook_inputs(
         if should_fetch_content and selection.head_path is not None and not skip_head_for_size:
             head_content, head_notice = _safe_fetch_file_content(
                 github_api=github_api,
-                repository=context.repository,
+                repository=context.head_repository,
                 path=selection.head_path,
                 ref=context.head_sha,
             )
@@ -425,6 +476,137 @@ def _build_notebook_inputs(
     return notebook_inputs, notices
 
 
+def _fetch_notebooklens_config(
+    *,
+    github_api: GitHubNotebookApiClient,
+    context: PullRequestContext,
+) -> Tuple[Optional[str], List[str]]:
+    content, notice = _safe_fetch_file_content(
+        github_api=github_api,
+        repository=context.head_repository,
+        path=CONFIG_FILE_PATH,
+        ref=context.head_sha,
+    )
+    notices: List[str] = []
+    if notice is not None:
+        notices.append(f"{CONFIG_FILE_PATH}: {notice}")
+    return content, notices
+
+
+def _parse_notebooklens_config(
+    content: Optional[str],
+) -> Tuple[Optional[NotebookLensConfig], List[str]]:
+    if content is None:
+        return None, []
+
+    try:
+        raw_config = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        return None, [_invalid_config_notice(f"invalid YAML ({_truncate_reason(exc)})")]
+
+    try:
+        return _validate_notebooklens_config(raw_config), []
+    except ValueError as exc:
+        return None, [_invalid_config_notice(str(exc))]
+
+
+def _validate_notebooklens_config(raw_config: Any) -> NotebookLensConfig:
+    if not isinstance(raw_config, Mapping):
+        raise ValueError("expected a top-level YAML mapping")
+
+    version = raw_config.get("version")
+    if version != 1:
+        raise ValueError("version must be set to 1")
+
+    reviewer_guidance_raw = raw_config.get("reviewer_guidance")
+    if reviewer_guidance_raw is None:
+        return NotebookLensConfig(version=1)
+    if not isinstance(reviewer_guidance_raw, Mapping):
+        raise ValueError("reviewer_guidance must be a mapping when present")
+
+    playbooks_raw = reviewer_guidance_raw.get("playbooks")
+    if playbooks_raw is None:
+        return NotebookLensConfig(version=1)
+    if not isinstance(playbooks_raw, list):
+        raise ValueError("reviewer_guidance.playbooks must be a list")
+
+    reviewer_playbooks = tuple(
+        _normalize_reviewer_playbook(item, index=index)
+        for index, item in enumerate(playbooks_raw)
+    )
+    return NotebookLensConfig(version=1, reviewer_playbooks=reviewer_playbooks)
+
+
+def _normalize_reviewer_playbook(raw_playbook: Any, *, index: int) -> ReviewerPlaybookConfig:
+    if not isinstance(raw_playbook, Mapping):
+        raise ValueError(f"reviewer_guidance.playbooks[{index}] must be a mapping")
+
+    name = _normalize_required_string(
+        raw_playbook.get("name"),
+        field_name=f"reviewer_guidance.playbooks[{index}].name",
+    )
+    paths = _normalize_string_list(
+        raw_playbook.get("paths"),
+        field_name=f"reviewer_guidance.playbooks[{index}].paths",
+        normalizer=_normalize_playbook_path,
+    )
+    prompts = _normalize_string_list(
+        raw_playbook.get("prompts"),
+        field_name=f"reviewer_guidance.playbooks[{index}].prompts",
+    )
+    return ReviewerPlaybookConfig(name=name, paths=paths, prompts=prompts)
+
+
+def _normalize_required_string(value: Any, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a non-empty string")
+    normalized = " ".join(value.strip().split())
+    if not normalized:
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return normalized
+
+
+def _normalize_string_list(
+    value: Any,
+    *,
+    field_name: str,
+    normalizer: Optional[Callable[[str], str]] = None,
+) -> Tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a non-empty list of strings")
+
+    seen: Dict[str, None] = {}
+    normalized_items: List[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{field_name} must contain only non-empty strings")
+        normalized = item.strip()
+        if normalizer is not None:
+            normalized = normalizer(normalized)
+        if not normalized:
+            raise ValueError(f"{field_name} must contain only non-empty strings")
+        if normalized in seen:
+            continue
+        seen[normalized] = None
+        normalized_items.append(normalized)
+
+    if not normalized_items:
+        raise ValueError(f"{field_name} must be a non-empty list of strings")
+
+    return tuple(normalized_items)
+
+
+def _normalize_playbook_path(value: str) -> str:
+    return value.replace("\\", "/")
+
+
+def _invalid_config_notice(reason: str) -> str:
+    return (
+        f"Ignored reviewer guidance playbooks from {CONFIG_FILE_PATH}: {reason}. "
+        "Continuing with built-in guidance only."
+    )
+
+
 def _safe_fetch_file_content(
     *,
     github_api: GitHubNotebookApiClient,
@@ -443,13 +625,19 @@ def _resolve_provider(
     *,
     context: PullRequestContext,
     inputs: ActionInputs,
+    base_reviewer_guidance: Sequence[Any],
     provider_factory: Callable[[ProviderConfig], ProviderInterface],
 ) -> Tuple[ProviderInterface, ProviderName, ProviderName, List[str]]:
     requested = inputs.ai_provider
     notices: List[str] = []
 
     if requested == "none":
-        return provider_factory(_provider_config(inputs, "none")), requested, "none", notices
+        return (
+            provider_factory(_provider_config(inputs, "none", base_reviewer_guidance)),
+            requested,
+            "none",
+            notices,
+        )
 
     api_key_present = bool((inputs.ai_api_key or "").strip())
     if not api_key_present:
@@ -459,18 +647,28 @@ def _resolve_provider(
             )
         else:
             notices.append("ai-provider=claude requested without ai-api-key; falling back to none mode.")
-        return provider_factory(_provider_config(inputs, "none")), requested, "none", notices
+        return (
+            provider_factory(_provider_config(inputs, "none", base_reviewer_guidance)),
+            requested,
+            "none",
+            notices,
+        )
 
-    provider = provider_factory(_provider_config(inputs, "claude"))
+    provider = provider_factory(_provider_config(inputs, "claude", base_reviewer_guidance))
     return provider, requested, "claude", notices
 
 
-def _provider_config(inputs: ActionInputs, ai_provider: ProviderName) -> ProviderConfig:
+def _provider_config(
+    inputs: ActionInputs,
+    ai_provider: ProviderName,
+    base_reviewer_guidance: Sequence[Any],
+) -> ProviderConfig:
     return ProviderConfig(
         ai_provider=ai_provider,
         ai_api_key=inputs.ai_api_key,
         redact_secrets=inputs.redact_secrets,
         redact_emails=inputs.redact_emails,
+        base_reviewer_guidance=tuple(base_reviewer_guidance),
     )
 
 
@@ -748,8 +946,10 @@ __all__ = [
     "ActionRunMetadata",
     "ActionRunResult",
     "GitHubNotebookApiClient",
+    "NotebookLensConfig",
     "PullRequestContext",
     "PullRequestFile",
+    "ReviewerPlaybookConfig",
     "load_action_inputs",
     "load_pull_request_context",
     "log_run_result",

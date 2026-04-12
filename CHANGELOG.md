@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Reviewer guidance playbooks via optional `.github/notebooklens.yml`, merged into notebook-local PR comment guidance sections.
+- Built-in reviewer guidance in `none` mode so changed notebooks receive actionable prompts without any external AI call.
+
+### Changed
+
+- Reviewer playbook config is read from the PR head revision, including fork PRs and renamed notebooks matched on their current head path.
+- Malformed reviewer-guidance config now falls back to built-in guidance with one visible PR comment notice instead of failing the run.
+
 ## [0.1.0] - 2026-04-11
 
 ### Added

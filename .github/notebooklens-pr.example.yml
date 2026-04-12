@@ -22,6 +22,9 @@ jobs:
           redact-secrets: true
           redact-emails: true
 
+      # Optional repo-level reviewer playbooks live in .github/notebooklens.yml.
+      # They are not action inputs and still work in none mode.
+
       # Optional second step: enable Claude after none-mode baseline is validated.
       # - name: Run NotebookLens (Claude mode)
       #   uses: Gsbreddy/notebooklens@v0

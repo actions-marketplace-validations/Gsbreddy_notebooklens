@@ -5,7 +5,7 @@ WORKDIR /app
 COPY pyproject.toml /app/pyproject.toml
 COPY src /app/src
 
-RUN pip install --no-cache-dir anthropic pydantic requests python-dotenv
+RUN pip install --no-cache-dir anthropic pydantic requests python-dotenv PyYAML
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1

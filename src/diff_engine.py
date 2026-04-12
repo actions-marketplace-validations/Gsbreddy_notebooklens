@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 import json
 import re
@@ -26,6 +26,8 @@ IssueCategory = Literal[
     "review_guidance",
 ]
 Confidence = Literal["low", "medium", "high"]
+ReviewerGuidanceSource = Literal["built_in", "playbook", "claude"]
+ReviewerGuidancePriority = Literal["low", "medium", "high"]
 
 
 MAX_NOTEBOOK_BYTES = 50 * 1024 * 1024
@@ -100,9 +102,21 @@ class FlaggedIssue:
 
 
 @dataclass(frozen=True)
+class ReviewerGuidanceItem:
+    notebook_path: str
+    locator: Optional[CellLocator]
+    code: str
+    source: ReviewerGuidanceSource
+    label: Optional[str]
+    priority: ReviewerGuidancePriority
+    message: str
+
+
+@dataclass(frozen=True)
 class ReviewResult:
     summary: Optional[str]
     flagged_issues: List[FlaggedIssue]
+    reviewer_guidance: List[ReviewerGuidanceItem] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

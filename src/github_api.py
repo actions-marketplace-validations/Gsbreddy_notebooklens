@@ -10,7 +10,14 @@ from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
-from .diff_engine import CellChange, CellLocator, NotebookDiff, NotebookFileDiff, ReviewResult
+from .diff_engine import (
+    CellChange,
+    CellLocator,
+    NotebookDiff,
+    NotebookFileDiff,
+    ReviewerGuidanceItem,
+    ReviewResult,
+)
 
 
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
@@ -512,8 +519,14 @@ def render_pull_request_comment(
     if not notebook_diff.notebooks:
         lines.append("- No notebook diffs were produced.")
 
+    guidance_by_notebook = _group_reviewer_guidance(review_result.reviewer_guidance)
     for notebook in notebook_diff.notebooks:
-        lines.extend(_render_notebook_section(notebook))
+        lines.extend(
+            _render_notebook_section(
+                notebook,
+                reviewer_guidance=guidance_by_notebook.get(notebook.path, ()),
+            )
+        )
 
     if review_result.flagged_issues:
         lines.append("")
@@ -603,7 +616,11 @@ def ensure_marker(body: str) -> str:
     return f"{NOTEBOOKLENS_COMMENT_MARKER}\n{normalized}"
 
 
-def _render_notebook_section(notebook: NotebookFileDiff) -> List[str]:
+def _render_notebook_section(
+    notebook: NotebookFileDiff,
+    *,
+    reviewer_guidance: Sequence[ReviewerGuidanceItem] = (),
+) -> List[str]:
     lines: List[str] = [
         "",
         f"#### `{notebook.path}` (`{notebook.change_type}`)",
@@ -623,6 +640,11 @@ def _render_notebook_section(notebook: NotebookFileDiff) -> List[str]:
         lines.append(f"- Cells with output updates: **{summary['output_cells']}**")
         for change in notebook.cell_changes:
             lines.append(_render_cell_change_line(change))
+    if reviewer_guidance:
+        lines.append("")
+        lines.append("##### Reviewer Guidance")
+        for item in reviewer_guidance:
+            lines.append(_render_reviewer_guidance_line(item))
     if notebook.notices:
         joined = "; ".join(_sanitize_inline(item) for item in notebook.notices)
         lines.append(f"- Notebook notices: {joined}")
@@ -657,6 +679,20 @@ def _render_cell_change_line(change: CellChange) -> str:
     return base_line
 
 
+def _render_reviewer_guidance_line(item: ReviewerGuidanceItem) -> str:
+    prefix = ""
+    if item.source == "playbook" and item.label:
+        prefix = f"{_sanitize_inline(item.label)}: "
+    elif item.source == "claude":
+        prefix = "AI guidance: "
+
+    location = ""
+    if item.locator is not None:
+        location = f"{_format_cell_locator(item.locator)} - "
+
+    return f"- {location}{prefix}{_sanitize_inline(item.message)}"
+
+
 def _format_output_updates(change: CellChange) -> str:
     if not change.output_changes:
         return ""
@@ -665,6 +701,15 @@ def _format_output_updates(change: CellChange) -> str:
         suffix = " (truncated for AI)" if item.truncated else ""
         fragments.append(f"{_sanitize_inline(item.summary)}{suffix}")
     return "; ".join(fragments)
+
+
+def _group_reviewer_guidance(
+    reviewer_guidance: Sequence[ReviewerGuidanceItem],
+) -> Dict[str, Tuple[ReviewerGuidanceItem, ...]]:
+    grouped: Dict[str, List[ReviewerGuidanceItem]] = {}
+    for item in reviewer_guidance:
+        grouped.setdefault(item.notebook_path, []).append(item)
+    return {path: tuple(items) for path, items in grouped.items()}
 
 
 def _format_cell_locator(locator: CellLocator) -> str:
