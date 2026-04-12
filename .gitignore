@@ -9,3 +9,9 @@ __pycache__/
 build/
 dist/
 htmlcov/
+node_modules/
+.next/
+coverage/
+apps/web/.next/
+apps/web/coverage/
+*.tsbuildinfo
