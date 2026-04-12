@@ -32,3 +32,23 @@ jobs:
 
       - name: Build Docker action image
         run: docker build -t notebooklens-ci .
+
+  managed-stack:
+    name: managed-stack
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILDKIT: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build managed API image
+        run: docker build -f apps/api/Dockerfile -t notebooklens-api-ci .
+
+      - name: Build managed web image
+        run: docker build -f apps/web/Dockerfile -t notebooklens-web-ci .
+
+      - name: Validate Compose config
+        run: |
+          docker compose version
+          docker compose -f deploy/docker-compose.yml --env-file deploy/.env.example config > /tmp/notebooklens-compose.yml
