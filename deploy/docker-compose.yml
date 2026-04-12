@@ -1,0 +1,146 @@
+services:
+  gateway:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    environment:
+      APP_BASE_URL: ${APP_BASE_URL:?APP_BASE_URL is required}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      APP_BASE_URL: ${APP_BASE_URL:?APP_BASE_URL is required}
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_BASE_URL: ${APP_BASE_URL:?APP_BASE_URL is required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:?GITHUB_APP_ID is required}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:?GITHUB_APP_PRIVATE_KEY is required}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?GITHUB_WEBHOOK_SECRET is required}
+      GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:?GITHUB_OAUTH_CLIENT_ID is required}
+      GITHUB_OAUTH_CLIENT_SECRET: ${GITHUB_OAUTH_CLIENT_SECRET:?GITHUB_OAUTH_CLIENT_SECRET is required}
+      GITHUB_HOST_KIND: ${GITHUB_HOST_KIND:?GITHUB_HOST_KIND is required}
+      GITHUB_API_BASE_URL: ${GITHUB_API_BASE_URL:?GITHUB_API_BASE_URL is required}
+      GITHUB_WEB_BASE_URL: ${GITHUB_WEB_BASE_URL:?GITHUB_WEB_BASE_URL is required}
+      GITHUB_ENTERPRISE_MIN_VERSION: ${GITHUB_ENTERPRISE_MIN_VERSION:?GITHUB_ENTERPRISE_MIN_VERSION is required}
+      REQUIRE_USER_GITHUB_TOKENS_FOR_MIRRORING: ${REQUIRE_USER_GITHUB_TOKENS_FOR_MIRRORING:?REQUIRE_USER_GITHUB_TOKENS_FOR_MIRRORING is required}
+      MIRROR_FALLBACK_TO_APP_AUTH: ${MIRROR_FALLBACK_TO_APP_AUTH:?MIRROR_FALLBACK_TO_APP_AUTH is required}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:?EMAIL_PROVIDER is required}
+      EMAIL_API_KEY: ${EMAIL_API_KEY:?EMAIL_API_KEY is required}
+      EMAIL_FROM: ${EMAIL_FROM:?EMAIL_FROM is required}
+      SNAPSHOT_RETENTION_DAYS: ${SNAPSHOT_RETENTION_DAYS:?SNAPSHOT_RETENTION_DAYS is required}
+      MANAGED_REVIEW_BETA_ENABLED: ${MANAGED_REVIEW_BETA_ENABLED:?MANAGED_REVIEW_BETA_ENABLED is required}
+      REVIEW_ASSET_STORAGE_DRIVER: ${REVIEW_ASSET_STORAGE_DRIVER:?REVIEW_ASSET_STORAGE_DRIVER is required}
+      REVIEW_ASSET_MAX_BYTES: ${REVIEW_ASSET_MAX_BYTES:?REVIEW_ASSET_MAX_BYTES is required}
+      REVIEW_ASSET_ALLOWED_MIME_TYPES: ${REVIEW_ASSET_ALLOWED_MIME_TYPES:?REVIEW_ASSET_ALLOWED_MIME_TYPES is required}
+      MANAGED_AI_UI_ENABLED: ${MANAGED_AI_UI_ENABLED:?MANAGED_AI_UI_ENABLED is required}
+      MANAGED_AI_GATEWAY_KIND: ${MANAGED_AI_GATEWAY_KIND:?MANAGED_AI_GATEWAY_KIND is required}
+      GITHUB_PR_SYNC_ENABLED: ${GITHUB_PR_SYNC_ENABLED:?GITHUB_PR_SYNC_ENABLED is required}
+    command: ["run-managed-service", "api"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_BASE_URL: ${APP_BASE_URL:?APP_BASE_URL is required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:?GITHUB_APP_ID is required}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:?GITHUB_APP_PRIVATE_KEY is required}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?GITHUB_WEBHOOK_SECRET is required}
+      GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:?GITHUB_OAUTH_CLIENT_ID is required}
+      GITHUB_OAUTH_CLIENT_SECRET: ${GITHUB_OAUTH_CLIENT_SECRET:?GITHUB_OAUTH_CLIENT_SECRET is required}
+      GITHUB_HOST_KIND: ${GITHUB_HOST_KIND:?GITHUB_HOST_KIND is required}
+      GITHUB_API_BASE_URL: ${GITHUB_API_BASE_URL:?GITHUB_API_BASE_URL is required}
+      GITHUB_WEB_BASE_URL: ${GITHUB_WEB_BASE_URL:?GITHUB_WEB_BASE_URL is required}
+      GITHUB_ENTERPRISE_MIN_VERSION: ${GITHUB_ENTERPRISE_MIN_VERSION:?GITHUB_ENTERPRISE_MIN_VERSION is required}
+      REQUIRE_USER_GITHUB_TOKENS_FOR_MIRRORING: ${REQUIRE_USER_GITHUB_TOKENS_FOR_MIRRORING:?REQUIRE_USER_GITHUB_TOKENS_FOR_MIRRORING is required}
+      MIRROR_FALLBACK_TO_APP_AUTH: ${MIRROR_FALLBACK_TO_APP_AUTH:?MIRROR_FALLBACK_TO_APP_AUTH is required}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:?EMAIL_PROVIDER is required}
+      EMAIL_API_KEY: ${EMAIL_API_KEY:?EMAIL_API_KEY is required}
+      EMAIL_FROM: ${EMAIL_FROM:?EMAIL_FROM is required}
+      SNAPSHOT_RETENTION_DAYS: ${SNAPSHOT_RETENTION_DAYS:?SNAPSHOT_RETENTION_DAYS is required}
+      MANAGED_REVIEW_BETA_ENABLED: ${MANAGED_REVIEW_BETA_ENABLED:?MANAGED_REVIEW_BETA_ENABLED is required}
+      REVIEW_ASSET_STORAGE_DRIVER: ${REVIEW_ASSET_STORAGE_DRIVER:?REVIEW_ASSET_STORAGE_DRIVER is required}
+      REVIEW_ASSET_MAX_BYTES: ${REVIEW_ASSET_MAX_BYTES:?REVIEW_ASSET_MAX_BYTES is required}
+      REVIEW_ASSET_ALLOWED_MIME_TYPES: ${REVIEW_ASSET_ALLOWED_MIME_TYPES:?REVIEW_ASSET_ALLOWED_MIME_TYPES is required}
+      MANAGED_AI_UI_ENABLED: ${MANAGED_AI_UI_ENABLED:?MANAGED_AI_UI_ENABLED is required}
+      MANAGED_AI_GATEWAY_KIND: ${MANAGED_AI_GATEWAY_KIND:?MANAGED_AI_GATEWAY_KIND is required}
+      GITHUB_PR_SYNC_ENABLED: ${GITHUB_PR_SYNC_ENABLED:?GITHUB_PR_SYNC_ENABLED is required}
+    command: ["run-managed-service", "worker"]
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: notebooklens
+      POSTGRES_USER: notebooklens
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U notebooklens -d notebooklens
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  caddy_config:
+  caddy_data:
+  postgres_data:
