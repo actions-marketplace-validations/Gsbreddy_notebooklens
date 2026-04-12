@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 import jwt
 from sqlalchemy import select
+import yaml
 
 from apps.api.config import ApiConfigurationError, ApiSettings, get_settings, reset_settings_cache
 from apps.api.check_runs import sync_review_workspace_check_run
@@ -91,8 +92,12 @@ def _generate_private_key() -> str:
 
 
 TEST_PRIVATE_KEY = _generate_private_key()
+REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 REVIEW_WORKSPACE_THREAD_PATH = "notebooks/training/churn_model.ipynb"
+SALES_FORECAST_NOTEBOOK_PATH = "notebooks/forecast/sales_forecast.ipynb"
+SALES_FORECAST_BASE_FIXTURE = "sales_forecast_plot_base.ipynb"
+SALES_FORECAST_HEAD_FIXTURE = "sales_forecast_plot_head.ipynb"
 SMALL_PNG_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2N1foAAAAASUVORK5CYII="
 )
@@ -468,6 +473,36 @@ def _settings(tmp_path: Path) -> ApiSettings:
 
 def fixture_text(name: str) -> str:
     return (FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+
+def sales_forecast_notebooks() -> tuple[str, str]:
+    return (
+        fixture_text(SALES_FORECAST_BASE_FIXTURE),
+        fixture_text(SALES_FORECAST_HEAD_FIXTURE),
+    )
+
+
+def assert_compose_smoke_stack_supports_managed_review_flow() -> None:
+    compose_path = REPO_ROOT / "deploy" / "docker-compose.yml"
+    caddyfile_path = REPO_ROOT / "deploy" / "Caddyfile"
+
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    services = compose["services"]
+
+    assert set(services) >= {"gateway", "web", "api", "worker", "postgres"}
+    assert services["gateway"]["depends_on"]["api"]["condition"] == "service_healthy"
+    assert services["gateway"]["depends_on"]["web"]["condition"] == "service_healthy"
+    assert services["api"]["command"] == ["run-managed-service", "api"]
+    assert services["worker"]["command"] == ["run-managed-service", "worker"]
+    assert services["api"]["environment"]["APP_BASE_URL"] == "${APP_BASE_URL:?APP_BASE_URL is required}"
+    assert services["worker"]["environment"]["GITHUB_PR_SYNC_ENABLED"] == (
+        "${GITHUB_PR_SYNC_ENABLED:?GITHUB_PR_SYNC_ENABLED is required}"
+    )
+
+    caddyfile = caddyfile_path.read_text(encoding="utf-8")
+    assert "@api path /api /api/*" in caddyfile
+    assert "reverse_proxy @api api:8000" in caddyfile
+    assert "reverse_proxy web:3000" in caddyfile
 
 
 def pull_request_payload(
@@ -3863,5 +3898,328 @@ def test_github_mirror_worker_uses_workspace_comment_fallback_for_unmappable_met
     assert "Please explain the metadata tag change." in workspace_comment["body"]
     assert "I will add the reasoning in the next update." in workspace_comment["body"]
     assert "resolved" in workspace_comment["body"]
+
+    engine.dispose()
+
+
+def test_sales_forecast_managed_workspace_scenario_covers_compose_assets_gateway_and_github_sync(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    engine = get_engine(settings.database_url)
+    create_all_tables(engine)
+    installation_id = create_github_installation_fixture(settings)
+    base_notebook, head_notebook = sales_forecast_notebooks()
+    assert "sales_q1.csv" in base_notebook
+    assert "mae = 12.4" in base_notebook
+    assert "sales_q2.csv" in head_notebook
+    assert "mae = 18.7" in head_notebook
+    fake_github = FakeManagedGitHubClient(
+        files=[
+            {
+                "filename": SALES_FORECAST_NOTEBOOK_PATH,
+                "status": "modified",
+                "size": 4096,
+            }
+        ],
+        contents={
+            (SALES_FORECAST_NOTEBOOK_PATH, "sales-base-sha"): base_notebook,
+            (SALES_FORECAST_NOTEBOOK_PATH, "sales-head-sha"): head_notebook,
+        },
+    )
+    fake_oauth = FakeOAuthClient(
+        users_by_token={
+            "gho_owner": GitHubOAuthUser(
+                id=101,
+                login="octo-owner",
+                email="owner@example.test",
+            ),
+            "gho_reviewer_1": GitHubOAuthUser(
+                id=202,
+                login="analyst-1",
+                email="analyst-1@example.test",
+            ),
+            "gho_reviewer_2": GitHubOAuthUser(
+                id=303,
+                login="analyst-2",
+                email="analyst-2@example.test",
+            ),
+        },
+        org_owner_access={("gho_owner", "octo-org"): True},
+    )
+    app = create_app()
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_managed_github_client] = lambda: fake_github
+    app.dependency_overrides[get_oauth_client] = lambda: fake_oauth
+    client = TestClient(app)
+
+    owner_session = create_user_session(
+        settings,
+        github_user_id=101,
+        github_login="octo-owner",
+        access_token="gho_owner",
+    )
+    reviewer_session = create_user_session(
+        settings,
+        github_user_id=202,
+        github_login="analyst-1",
+        access_token="gho_reviewer_1",
+    )
+    reviewer_two_session = create_user_session(
+        settings,
+        github_user_id=303,
+        github_login="analyst-2",
+        access_token="gho_reviewer_2",
+    )
+
+    assert_compose_smoke_stack_supports_managed_review_flow()
+
+    client.cookies.set(SESSION_COOKIE_NAME, owner_session)
+    ai_gateway_response = client.put(
+        f"/api/settings/ai-gateway?installation_id={installation_id}",
+        json={
+            "provider_kind": "litellm",
+            "display_name": "Internal LiteLLM",
+            "github_host_kind": "github_com",
+            "github_api_base_url": "https://api.github.com",
+            "github_web_base_url": "https://github.com",
+            "base_url": "https://litellm.internal.example/v1",
+            "model_name": "gpt-4.1",
+            "api_key": "Bearer managed-secret",
+            "api_key_header_name": "Authorization",
+            "static_headers": {"x-tenant-token": "tenant-secret"},
+            "use_responses_api": False,
+            "litellm_virtual_key_id": "vk-sales",
+            "active": True,
+        },
+    )
+    assert ai_gateway_response.status_code == 200
+    assert ai_gateway_response.json()["config"]["provider_kind"] == "litellm"
+    assert ai_gateway_response.json()["config"]["active"] is True
+
+    webhook_response = post_pull_request_webhook(
+        client,
+        payload=pull_request_payload(
+            base_sha="sales-base-sha",
+            head_sha="sales-head-sha",
+        ),
+        delivery_id="sales-forecast-build-1",
+    )
+    assert webhook_response.status_code == 202
+
+    success_gateway = FakeLiteLLMGatewayClient(
+        responses=[
+            json.dumps(
+                {
+                    "summary": "Managed AI summary for the updated weekly sales forecast.",
+                    "flagged_issues": [
+                        {
+                            "notebook_path": SALES_FORECAST_NOTEBOOK_PATH,
+                            "locator": {
+                                "cell_id": None,
+                                "base_index": None,
+                                "head_index": None,
+                                "display_index": None,
+                            },
+                            "code": "ai:forecast_shift",
+                            "category": "output",
+                            "severity": "medium",
+                            "confidence": "medium",
+                            "message": "Explain why the forecast curve shifted downward.",
+                        }
+                    ],
+                    "reviewer_guidance": [
+                        {
+                            "notebook_path": SALES_FORECAST_NOTEBOOK_PATH,
+                            "locator": None,
+                            "code": "claude:forecast_context",
+                            "source": "claude",
+                            "label": "AI",
+                            "priority": "medium",
+                            "message": "Call out the sales_q2.csv input swap and the wider forecast window.",
+                        }
+                    ],
+                }
+            )
+        ]
+    )
+    with session_scope(settings) as db_session:
+        first_result = run_snapshot_build_worker_once(
+            settings=settings,
+            db_session=db_session,
+            github_client=fake_github,
+            litellm_client=success_gateway,
+        )
+        assert first_result.status == "succeeded"
+        assert first_result.snapshot_index == 1
+    assert len(success_gateway.calls) == 1
+    assert success_gateway.calls[0]["api_key"] == "Bearer managed-secret"
+    assert SALES_FORECAST_NOTEBOOK_PATH in success_gateway.calls[0]["prompt"]
+
+    initial_mirror_results = run_github_mirror_worker_until_idle(
+        settings=settings,
+        github_client=fake_github,
+    )
+    assert [result.status for result in initial_mirror_results] == ["sent", "idle"]
+
+    client.cookies.set(SESSION_COOKIE_NAME, owner_session)
+    review_page_response = client.get("/api/reviews/octo-org/notebooklens/pulls/7")
+    assert review_page_response.status_code == 200
+    review_page = review_page_response.json()
+    assert review_page["review"]["selected_snapshot_index"] == 1
+    assert review_page["snapshot"]["payload"]["review"]["notebooks"][0]["path"] == SALES_FORECAST_NOTEBOOK_PATH
+    plot_row = review_row_for_cell(review_page, cell_id="forecast-plot")
+    metric_row = review_row_for_cell(review_page, cell_id="forecast-metrics")
+    assert plot_row["source"]["changed"] is True
+    assert plot_row["outputs"]["changed"] is True
+    assert plot_row["metadata"]["changed"] is True
+    assert plot_row["outputs"]["items"][0]["kind"] == "image"
+    assert plot_row["outputs"]["items"][0]["change_type"] == "modified"
+    assert metric_row["outputs"]["changed"] is True
+    asset_id = plot_row["outputs"]["items"][0]["asset_id"]
+
+    client.cookies.set(SESSION_COOKIE_NAME, reviewer_session)
+    asset_response = client.get(f"/api/review-assets/{asset_id}")
+    assert asset_response.status_code == 200
+    assert asset_response.headers["content-type"] == "image/png"
+    assert asset_response.content
+    assert ("gho_reviewer_1", "octo-org", "notebooklens") in fake_oauth.repo_access_checks
+
+    client.cookies.set(SESSION_COOKIE_NAME, owner_session)
+    rebuild_response = client.post(f"/api/reviews/{review_page['review']['id']}/rebuild-latest")
+    assert rebuild_response.status_code == 202
+    assert rebuild_response.json()["force_rebuild"] is True
+
+    failing_gateway = FakeLiteLLMGatewayClient(error="gateway exploded")
+    with session_scope(settings) as db_session:
+        second_result = run_snapshot_build_worker_once(
+            settings=settings,
+            db_session=db_session,
+            github_client=fake_github,
+            litellm_client=failing_gateway,
+        )
+        assert second_result.status == "succeeded"
+        assert second_result.snapshot_index == 2
+    assert len(failing_gateway.calls) == 2
+
+    rebuild_mirror_results = run_github_mirror_worker_until_idle(
+        settings=settings,
+        github_client=fake_github,
+    )
+    assert [result.status for result in rebuild_mirror_results] == ["sent", "idle"]
+
+    with session_scope(settings) as db_session:
+        snapshots = db_session.scalars(
+            select(ReviewSnapshot).order_by(ReviewSnapshot.snapshot_index.asc())
+        ).all()
+        assert [snapshot.snapshot_index for snapshot in snapshots] == [1, 2]
+        assert snapshots[0].summary_text == "Managed AI summary for the updated weekly sales forecast."
+        assert snapshots[1].summary_text is not None
+        assert "Managed LiteLLM review unavailable: gateway exploded." in snapshots[1].summary_text
+        assert (
+            "Managed LiteLLM review unavailable: gateway exploded. Used deterministic local findings."
+            in snapshots[1].snapshot_payload_json["review"]["notices"]
+        )
+
+    client.cookies.set(SESSION_COOKIE_NAME, reviewer_session)
+    latest_workspace_response = client.get("/api/reviews/octo-org/notebooklens/pulls/7")
+    assert latest_workspace_response.status_code == 200
+    latest_workspace = latest_workspace_response.json()
+    assert latest_workspace["review"]["selected_snapshot_index"] == 2
+    assert latest_workspace["snapshot"]["summary_text"] is not None
+    assert "Managed LiteLLM review unavailable: gateway exploded." in latest_workspace["snapshot"][
+        "summary_text"
+    ]
+
+    latest_plot_row = review_row_for_cell(latest_workspace, cell_id="forecast-plot")
+    create_plot_thread_response = client.post(
+        f"/api/reviews/{latest_workspace['review']['id']}/threads",
+        json={
+            "snapshot_id": latest_workspace["snapshot"]["id"],
+            "anchor": latest_plot_row["thread_anchors"]["outputs"],
+            "body_markdown": "Explain why the forecast curve shifted downward.",
+        },
+    )
+    assert create_plot_thread_response.status_code == 201
+    plot_thread_id = create_plot_thread_response.json()["thread"]["id"]
+
+    client.cookies.set(SESSION_COOKIE_NAME, reviewer_two_session)
+    reply_response = client.post(
+        f"/api/threads/{plot_thread_id}/messages",
+        json={
+            "body_markdown": "The Q2 data and wider smoothing window both lowered the projected curve.",
+        },
+    )
+    assert reply_response.status_code == 201
+
+    client.cookies.set(SESSION_COOKIE_NAME, reviewer_session)
+    fallback_thread_response = client.post(
+        f"/api/reviews/{latest_workspace['review']['id']}/threads",
+        json={
+            "snapshot_id": latest_workspace["snapshot"]["id"],
+            "anchor": latest_plot_row["thread_anchors"]["metadata"],
+            "body_markdown": "Please explain why the forecast-review metadata tag was added.",
+        },
+    )
+    assert fallback_thread_response.status_code == 201
+
+    thread_mirror_results = run_github_mirror_worker_until_idle(
+        settings=settings,
+        github_client=fake_github,
+    )
+    assert [result.status for result in thread_mirror_results] == ["sent", "sent", "sent", "idle"]
+
+    assert len(fake_github.review_comment_calls) == 2
+    root_call = fake_github.review_comment_calls[0]
+    assert root_call["op"] == "create_root"
+    assert root_call["access_token"] == "gho_reviewer_1"
+    assert root_call["path"] == SALES_FORECAST_NOTEBOOK_PATH
+    assert root_call["line"] > 0
+    assert "Explain why the forecast curve shifted downward." in root_call["body"]
+
+    reply_call = fake_github.review_comment_calls[1]
+    assert reply_call["op"] == "create_reply"
+    assert reply_call["access_token"] == "gho_reviewer_2"
+    assert "The Q2 data and wider smoothing window both lowered the projected curve." in reply_call[
+        "body"
+    ]
+
+    final_workspace_response = client.get("/api/reviews/octo-org/notebooklens/pulls/7")
+    assert final_workspace_response.status_code == 200
+    final_workspace = final_workspace_response.json()
+    threads_by_body = {
+        thread["messages"][0]["body_markdown"]: thread
+        for thread in final_workspace["threads"]
+    }
+
+    mirrored_thread = threads_by_body["Explain why the forecast curve shifted downward."]
+    assert mirrored_thread["messages"][1]["body_markdown"] == (
+        "The Q2 data and wider smoothing window both lowered the projected curve."
+    )
+    assert mirrored_thread["github_mirror"]["state"] == "mirrored"
+    assert mirrored_thread["github_mirror"]["root_comment_url"] is not None
+    assert mirrored_thread["github_mirror"]["target"] == "github_review_comment"
+
+    fallback_thread = threads_by_body[
+        "Please explain why the forecast-review metadata tag was added."
+    ]
+    assert fallback_thread["github_mirror"]["state"] == "skipped"
+    assert fallback_thread["github_mirror"]["fallback_reason"] == "unmappable_anchor"
+    assert fallback_thread["github_mirror"]["target"] == "workspace_fallback"
+
+    with session_scope(settings) as db_session:
+        review = db_session.scalars(select(ManagedReview)).one()
+        assert review.github_workspace_comment_id is not None
+        workspace_comment = fake_github.issue_comments[review.github_workspace_comment_id]
+
+    assert "[Open in NotebookLens](https://notebooklens.test/reviews/octo-org/notebooklens/pulls/7)" in (
+        workspace_comment["body"]
+    )
+    assert SALES_FORECAST_NOTEBOOK_PATH in workspace_comment["body"]
+    assert "### Fallback Threads" in workspace_comment["body"]
+    assert "metadata" in workspace_comment["body"]
+    assert "Please explain why the forecast-review metadata tag was added." in workspace_comment[
+        "body"
+    ]
 
     engine.dispose()
