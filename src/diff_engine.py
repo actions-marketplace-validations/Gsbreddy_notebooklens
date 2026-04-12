@@ -1,4 +1,4 @@
-"""Notebook diff engine for NotebookLens v0.2.0."""
+"""Notebook diff engine for NotebookLens."""
 
 from __future__ import annotations
 
@@ -424,7 +424,7 @@ def _normalize_output(output: Dict[str, Any]) -> Dict[str, Any]:
     normalized: Dict[str, Any] = {}
     for key, value in output.items():
         if key in {"execution_count", "metadata"}:
-            # Ignore volatile output metadata churn for v0.2.0 significance.
+            # Ignore volatile output metadata churn for review significance.
             continue
         normalized[str(key)] = _stable_jsonable(value)
     return normalized

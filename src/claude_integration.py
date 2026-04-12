@@ -390,7 +390,7 @@ class ClaudeProvider(ProviderInterface):
 
 
 def build_provider(config: ProviderConfig) -> ProviderInterface:
-    """Factory for v0.2.0 provider modes (`none` and `claude`)."""
+    """Factory for the supported provider modes (`none` and `claude`)."""
     if config.ai_provider == "none":
         return NoneProvider(base_reviewer_guidance=config.base_reviewer_guidance)
     if config.ai_provider == "claude":
@@ -407,7 +407,7 @@ def build_provider(config: ProviderConfig) -> ProviderInterface:
             retry_attempts=config.retry_attempts,
             base_reviewer_guidance=config.base_reviewer_guidance,
         )
-    raise ValueError(f"Unsupported ai-provider for v0.2.0: {config.ai_provider}")
+    raise ValueError(f"Unsupported ai-provider for NotebookLens: {config.ai_provider}")
 
 
 def parse_strict_review_result(raw_text: str, diff: NotebookDiff) -> ReviewResult:
