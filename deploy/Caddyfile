@@ -1,0 +1,8 @@
+{$APP_BASE_URL} {
+	encode zstd gzip
+
+	@api path /api /api/*
+	reverse_proxy @api api:8000
+
+	reverse_proxy web:3000
+}

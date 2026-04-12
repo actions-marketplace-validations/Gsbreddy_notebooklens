@@ -1,6 +1,9 @@
 import { cookies } from "next/headers";
 
-import type { WorkspacePayload } from "@/lib/types";
+import type {
+  AiGatewaySettingsResponse,
+  WorkspacePayload,
+} from "@/lib/types";
 
 
 export class ApiRequestError extends Error {
@@ -39,6 +42,15 @@ export async function getSnapshotWorkspace(
 }
 
 
+export async function getAiGatewaySettings(
+  installationId: string,
+): Promise<AiGatewaySettingsResponse> {
+  return apiRequest<AiGatewaySettingsResponse>(
+    `/api/settings/ai-gateway?installation_id=${encodeURIComponent(installationId)}`,
+  );
+}
+
+
 export async function postApi(
   path: string,
   body?: unknown,
@@ -50,10 +62,37 @@ export async function postApi(
 }
 
 
+export async function postApiJson<T>(
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  return apiRequest<T>(path, {
+    method: "POST",
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+
+export async function putApiJson<T>(
+  path: string,
+  body: unknown,
+): Promise<T> {
+  return apiRequest<T>(path, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+
 export function buildLoginHref(nextPath: string): string {
   const url = new URL("/api/auth/github/login", getApiBaseUrl());
   url.searchParams.set("next_path", nextPath);
   return url.toString();
+}
+
+
+export function buildApiHref(path: string): string {
+  return new URL(path, getApiBaseUrl()).toString();
 }
 
 

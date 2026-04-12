@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -18,6 +20,9 @@ from src.review_core import (
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+SMALL_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2N1foAAAAASUVORK5CYII="
+)
 
 
 def fixture_text(name: str) -> str:
@@ -53,6 +58,31 @@ def _modified_input() -> NotebookInput:
     )
 
 
+def _notebook_with_cells(cells: Sequence[Mapping[str, Any]]) -> str:
+    return json.dumps(
+        {
+            "cells": list(cells),
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+    )
+
+
+def _code_cell(
+    cell_id: str,
+    *,
+    outputs: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "cell_type": "code",
+        "id": cell_id,
+        "source": "render_plot()",
+        "metadata": {},
+        "outputs": list(outputs or []),
+    }
+
+
 def test_build_review_artifacts_produces_versioned_snapshot_payload() -> None:
     artifacts = build_review_artifacts(
         ReviewCoreRequest(
@@ -77,6 +107,107 @@ def test_build_review_artifacts_produces_versioned_snapshot_payload() -> None:
     assert set(modified_row["thread_anchors"]) == {"source", "outputs", "metadata"}
     assert modified_row["thread_anchors"]["source"]["notebook_path"] == "analysis/notebook.ipynb"
     assert modified_row["thread_anchors"]["source"]["source_fingerprint"]
+
+
+def test_build_review_artifacts_extracts_supported_image_assets_and_keeps_placeholders() -> None:
+    oversized_gif_base64 = base64.b64encode(
+        b"GIF89a\x01\x00\x01\x00" + (b"\x00" * 2_097_200)
+    ).decode("ascii")
+    base_notebook = _notebook_with_cells(
+        [
+            _code_cell("plot-one"),
+            _code_cell("plot-two"),
+            _code_cell("svg-plot"),
+            _code_cell("too-large-plot"),
+        ]
+    )
+    head_notebook = _notebook_with_cells(
+        [
+            _code_cell(
+                "plot-one",
+                outputs=[
+                    {
+                        "output_type": "display_data",
+                        "data": {"image/png": SMALL_PNG_BASE64},
+                    }
+                ],
+            ),
+            _code_cell(
+                "plot-two",
+                outputs=[
+                    {
+                        "output_type": "display_data",
+                        "data": {"image/png": SMALL_PNG_BASE64},
+                    }
+                ],
+            ),
+            _code_cell(
+                "svg-plot",
+                outputs=[
+                    {
+                        "output_type": "display_data",
+                        "data": {
+                            "image/svg+xml": (
+                                "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'></svg>"
+                            )
+                        },
+                    }
+                ],
+            ),
+            _code_cell(
+                "too-large-plot",
+                outputs=[
+                    {
+                        "output_type": "display_data",
+                        "data": {"image/gif": oversized_gif_base64},
+                    }
+                ],
+            ),
+        ]
+    )
+
+    artifacts = build_review_artifacts(
+        ReviewCoreRequest(
+            notebook_inputs=[
+                NotebookInput(
+                    path="analysis/plots.ipynb",
+                    change_type="modified",
+                    base_content=base_notebook,
+                    head_content=head_notebook,
+                )
+            ],
+            reviewer=NoneProvider(),
+        )
+    )
+
+    assert len(artifacts.review_assets) == 1
+    asset = artifacts.review_assets[0]
+    assert asset.mime_type == "image/png"
+    assert asset.width == 1
+    assert asset.height == 1
+
+    rows = {
+        row["locator"]["cell_id"]: row
+        for row in artifacts.snapshot_payload["review"]["notebooks"][0]["render_rows"]
+    }
+    plot_one_item = rows["plot-one"]["outputs"]["items"][0]
+    plot_two_item = rows["plot-two"]["outputs"]["items"][0]
+    assert plot_one_item["kind"] == "image"
+    assert plot_one_item["asset_key"] == plot_two_item["asset_key"] == asset.asset_key
+    assert plot_one_item["mime_type"] == "image/png"
+    assert plot_one_item["width"] == 1
+    assert plot_one_item["height"] == 1
+    assert plot_one_item["change_type"] == "added"
+
+    svg_item = rows["svg-plot"]["outputs"]["items"][0]
+    assert svg_item["kind"] == "placeholder"
+    assert "unsupported image format" in svg_item["summary"]
+    assert svg_item["change_type"] == "added"
+
+    oversized_item = rows["too-large-plot"]["outputs"]["items"][0]
+    assert oversized_item["kind"] == "placeholder"
+    assert "exceeds 2097152 bytes" in oversized_item["summary"]
+    assert oversized_item["change_type"] == "added"
 
 
 def test_build_review_snapshot_payload_rejects_unknown_schema_version() -> None:
@@ -110,6 +241,7 @@ def test_run_action_consumes_shared_review_core_boundary(monkeypatch: pytest.Mon
             notebook_diff=diff,
             review_result=review_result,
             snapshot_payload={"schema_version": 1, "review": {"notices": [], "notebooks": []}},
+            review_assets=[],
         )
 
     monkeypatch.setattr(github_action_module, "build_review_artifacts", fake_build_review_artifacts)

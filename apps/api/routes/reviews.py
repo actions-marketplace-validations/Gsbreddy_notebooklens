@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -12,8 +11,9 @@ from sqlalchemy.orm import Session
 from ..check_runs import sync_review_workspace_check_run
 from ..config import ApiSettings, get_settings
 from ..database import get_db_session
+from ..job_runner import enqueue_snapshot_build_job
 from ..managed_github import ManagedGitHubClient
-from ..models import ReviewThreadStatus
+from ..models import ManagedReviewStatus, ReviewThreadStatus
 from ..oauth import GitHubOAuthClient, OAuthSessionStore
 from ..review_workspace import (
     ReviewWorkspaceNotFoundError,
@@ -28,13 +28,18 @@ from ..review_workspace import (
     resolve_thread,
     serialize_thread,
 )
-from .auth import AuthenticatedUser, get_oauth_client, get_session_store, require_authenticated_user
+from .auth import (
+    AuthenticatedUser,
+    ensure_installation_admin,
+    get_oauth_client,
+    get_session_store,
+    require_authenticated_user,
+)
 from .github import get_managed_github_client
+from .repo_access import ensure_repo_access
 
 
 router = APIRouter(prefix="/api", tags=["reviews"])
-_ACCESS_CACHE_TTL = timedelta(minutes=5)
-_REPO_ACCESS_CACHE: dict[tuple[int, str], tuple[datetime, bool]] = {}
 
 
 class CreateThreadRequest(BaseModel):
@@ -56,7 +61,7 @@ def get_review(
     db_session: Session = Depends(get_db_session),
     oauth_client: GitHubOAuthClient = Depends(get_oauth_client),
 ) -> dict[str, Any]:
-    _ensure_repo_access(
+    ensure_repo_access(
         current_user=current_user,
         owner=owner,
         repo=repo,
@@ -84,7 +89,7 @@ def get_review_snapshot(
     db_session: Session = Depends(get_db_session),
     oauth_client: GitHubOAuthClient = Depends(get_oauth_client),
 ) -> dict[str, Any]:
-    _ensure_repo_access(
+    ensure_repo_access(
         current_user=current_user,
         owner=owner,
         repo=repo,
@@ -119,7 +124,7 @@ def create_review_thread(
 ) -> dict[str, Any]:
     try:
         review = load_review_by_id(db_session=db_session, review_id=review_id)
-        _ensure_repo_access(
+        ensure_repo_access(
             current_user=current_user,
             owner=review.owner,
             repo=review.repo,
@@ -157,6 +162,56 @@ def create_review_thread(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/reviews/{review_id}/rebuild-latest", status_code=status.HTTP_202_ACCEPTED)
+def rebuild_latest_review_snapshot(
+    review_id: str,
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+    db_session: Session = Depends(get_db_session),
+    settings: ApiSettings = Depends(get_settings),
+    github_client: ManagedGitHubClient = Depends(get_managed_github_client),
+    oauth_client: GitHubOAuthClient = Depends(get_oauth_client),
+) -> dict[str, Any]:
+    try:
+        review = load_review_by_id(db_session=db_session, review_id=review_id)
+        ensure_repo_access(
+            current_user=current_user,
+            owner=review.owner,
+            repo=review.repo,
+            oauth_client=oauth_client,
+        )
+        ensure_installation_admin(
+            current_user=current_user,
+            installation=review.installation_repository.installation,
+            oauth_client=oauth_client,
+        )
+        job = enqueue_snapshot_build_job(
+            db_session,
+            managed_review_id=review.id,
+            base_sha=review.latest_base_sha,
+            head_sha=review.latest_head_sha,
+            force_rebuild=True,
+        )
+        review.status = ManagedReviewStatus.PENDING
+        review.latest_check_run_id = sync_review_workspace_check_run(
+            settings=settings,
+            db_session=db_session,
+            github_client=github_client,
+            review=review,
+            activity="Snapshot rebuild queued for the latest push.",
+        )
+        db_session.commit()
+        return {
+            "status": "accepted",
+            "review_id": str(review.id),
+            "job_id": str(job.id),
+            "force_rebuild": True,
+            "check_run_id": review.latest_check_run_id,
+        }
+    except ReviewWorkspaceNotFoundError as exc:
+        db_session.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/threads/{thread_id}/messages", status_code=status.HTTP_201_CREATED)
 def create_thread_message(
     thread_id: str,
@@ -172,7 +227,7 @@ def create_thread_message(
         thread = load_thread_by_id(db_session=db_session, thread_id=thread_id)
         review = thread.managed_review
         previous_status = thread.status
-        _ensure_repo_access(
+        ensure_repo_access(
             current_user=current_user,
             owner=review.owner,
             repo=review.repo,
@@ -222,7 +277,7 @@ def resolve_thread_route(
         thread = load_thread_by_id(db_session=db_session, thread_id=thread_id)
         review = thread.managed_review
         previous_status = thread.status
-        _ensure_repo_access(
+        ensure_repo_access(
             current_user=current_user,
             owner=review.owner,
             repo=review.repo,
@@ -269,7 +324,7 @@ def reopen_thread_route(
         thread = load_thread_by_id(db_session=db_session, thread_id=thread_id)
         review = thread.managed_review
         previous_status = thread.status
-        _ensure_repo_access(
+        ensure_repo_access(
             current_user=current_user,
             owner=review.owner,
             repo=review.repo,
@@ -300,29 +355,6 @@ def reopen_thread_route(
     except ReviewWorkspaceNotFoundError as exc:
         db_session.rollback()
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-def _ensure_repo_access(
-    *,
-    current_user: AuthenticatedUser,
-    owner: str,
-    repo: str,
-    oauth_client: GitHubOAuthClient,
-) -> None:
-    cache_key = (current_user.github_user_id, f"{owner}/{repo}")
-    now = datetime.now(timezone.utc)
-    cached = _REPO_ACCESS_CACHE.get(cache_key)
-    if cached is not None and cached[0] >= now:
-        allowed = cached[1]
-    else:
-        allowed = oauth_client.can_access_repository(
-            current_user.access_token,
-            owner=owner,
-            repo=repo,
-        )
-        _REPO_ACCESS_CACHE[cache_key] = (now + _ACCESS_CACHE_TTL, allowed)
-    if not allowed:
-        raise HTTPException(status_code=403, detail="Repository access denied")
 
 
 def _thread_notebook_path(thread: Any) -> str:

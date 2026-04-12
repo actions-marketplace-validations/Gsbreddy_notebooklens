@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Mapping
 import os
+from urllib.parse import urlparse
 
 
 class ApiConfigurationError(ValueError):
@@ -28,6 +29,16 @@ def _parse_bool(value: str) -> bool:
     raise ApiConfigurationError(f"Invalid boolean value: {value}")
 
 
+def _normalize_origin_url(environ: Mapping[str, str], name: str) -> str:
+    value = _required(environ, name).rstrip("/")
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ApiConfigurationError(f"{name} must be an absolute http(s) origin")
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        raise ApiConfigurationError(f"{name} must be an origin without a path, query, or fragment")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 @dataclass(frozen=True)
 class ApiSettings:
     """Configuration required by the managed NotebookLens API."""
@@ -35,6 +46,7 @@ class ApiSettings:
     database_url: str
     app_base_url: str
     session_secret: str
+    encryption_key: str
     github_app_id: str
     github_app_private_key: str
     github_webhook_secret: str
@@ -55,8 +67,9 @@ class ApiSettings:
         private_key = _required(source, "GITHUB_APP_PRIVATE_KEY").replace("\\n", "\n")
         return cls(
             database_url=_required(source, "DATABASE_URL"),
-            app_base_url=_required(source, "APP_BASE_URL").rstrip("/"),
+            app_base_url=_normalize_origin_url(source, "APP_BASE_URL"),
             session_secret=_required(source, "SESSION_SECRET"),
+            encryption_key=_required(source, "ENCRYPTION_KEY"),
             github_app_id=_required(source, "GITHUB_APP_ID"),
             github_app_private_key=private_key,
             github_webhook_secret=_required(source, "GITHUB_WEBHOOK_SECRET"),

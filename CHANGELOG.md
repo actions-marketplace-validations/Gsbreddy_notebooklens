@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Managed workspace operator docs for the supported Docker Compose self-hosting path, installation-scoped LiteLLM settings, and GitHub PR sync behavior in `v0.4.0-beta`.
+
+### Changed
+
+- CI now validates the managed `apps/api` and `apps/web` Docker image builds and renders `deploy/docker-compose.yml` against `deploy/.env.example`.
+- Hosted workspace README scope now reflects `v0.4.0-beta`: Docker Compose self-hosting for internal pilots, installation-scoped LiteLLM configuration, and one-way GitHub PR mirroring while NotebookLens remains the source of truth.
+
 ## [0.3.0-beta] - 2026-04-12
 
 ### Added

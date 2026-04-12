@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Response
 from fastapi.responses import RedirectResponse
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..config import ApiSettings, get_settings
 from ..database import get_db_session
+from ..models import GitHubInstallation, InstallationAccountType
 from ..oauth import (
     GitHubOAuthClient,
     OAuthSessionStore,
@@ -164,3 +166,44 @@ def require_authenticated_user(
         github_login=session_record.github_login,
         access_token=session_store.cipher.decrypt(session_record.access_token_encrypted),
     )
+
+
+def ensure_installation_admin(
+    *,
+    current_user: AuthenticatedUser,
+    installation: GitHubInstallation,
+    oauth_client: GitHubOAuthClient,
+) -> None:
+    """Require the caller to be an installation admin for settings changes."""
+    if installation.account_type == InstallationAccountType.USER:
+        if current_user.github_login.casefold() == installation.account_login.casefold():
+            return
+        raise HTTPException(status_code=403, detail="Installation admin access required")
+
+    owner_checker = getattr(oauth_client, "is_org_owner", None)
+    if callable(owner_checker):
+        if owner_checker(current_user.access_token, org=installation.account_login):
+            return
+        raise HTTPException(status_code=403, detail="Installation admin access required")
+
+    response = oauth_client.session.get(
+        f"{oauth_client.api_base_url}/user/memberships/orgs/{quote(installation.account_login, safe='')}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {current_user.access_token}",
+        },
+        timeout=30,
+    )
+    if response.status_code == 200:
+        payload = response.json()
+        if payload.get("state") == "active" and payload.get("role") == "admin":
+            return
+    elif response.status_code not in {401, 403, 404}:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Unable to verify installation admin status: "
+                f"GitHub returned status {response.status_code}"
+            ),
+        )
+    raise HTTPException(status_code=403, detail="Installation admin access required")

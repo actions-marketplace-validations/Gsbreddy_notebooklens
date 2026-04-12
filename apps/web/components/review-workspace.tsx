@@ -1,4 +1,5 @@
 import type { Route } from "next";
+import Image from "next/image";
 import Link from "next/link";
 
 import {
@@ -9,15 +10,18 @@ import {
   resolveThreadAction,
 } from "@/lib/actions";
 import {
+  buildApiHref,
   buildLoginHref,
 } from "@/lib/api";
 import {
   buildAnchorKey,
+  buildAiGatewayRoute,
   buildSnapshotRoute,
   canStartThread,
   formatCellLabel,
   groupThreadsByAnchor,
   isBlockChanged,
+  summarizeGitHubMirrorStatus,
   summarizeFinding,
   summarizeGuidance,
 } from "@/lib/review-workspace";
@@ -79,6 +83,18 @@ export function ReviewWorkspace({
           </div>
         </div>
         <div className="hero-actions">
+          <Link
+            className="secondary-button"
+            href={
+              buildAiGatewayRoute(
+                workspace.review.owner,
+                workspace.review.repo,
+                workspace.review.pull_number,
+              ) as Route
+            }
+          >
+            LiteLLM settings
+          </Link>
           <a className="secondary-button" href={buildLoginHref(currentPath)}>
             Refresh access
           </a>
@@ -453,14 +469,26 @@ function BlockContent({
       <div className="output-list">
         {row.outputs.items.length ? (
           row.outputs.items.map((item, index) => (
-            <article className="output-card" key={`${item.output_type}-${index}`}>
-              <div className="output-head">
-                <strong>{item.output_type}</strong>
-                <span>{item.mime_group}</span>
-              </div>
-              <p>{item.summary}</p>
-              {item.truncated ? <span className="muted-copy">Output summary truncated</span> : null}
-            </article>
+            item.kind === "image" ? (
+              <ImageOutputCard item={item} key={`${item.asset_id}-${index}`} />
+            ) : (
+              <article className="output-card" key={`${item.output_type}-${index}`}>
+                <div className="output-head">
+                  <strong>{item.output_type}</strong>
+                  <div className="output-meta">
+                    <span>{item.mime_group}</span>
+                    <StatusPill
+                      label={item.change_type}
+                      tone={outputChangeTone(item.change_type)}
+                    />
+                  </div>
+                </div>
+                <p>{item.summary}</p>
+                {item.truncated ? (
+                  <span className="muted-copy">Output summary truncated</span>
+                ) : null}
+              </article>
+            )
           ))
         ) : (
           <p className="muted-copy">No output summaries were captured for this block.</p>
@@ -473,6 +501,41 @@ function BlockContent({
     <div className="metadata-card">
       <p>{row.metadata.summary ?? "Notebook metadata changed."}</p>
     </div>
+  );
+}
+
+
+function ImageOutputCard({
+  item,
+}: {
+  item: Extract<RenderRow["outputs"]["items"][number], { kind: "image" }>;
+}) {
+  return (
+    <article className="output-card image-output-card">
+      <div className="output-head">
+        <strong>Notebook image output</strong>
+        <div className="output-meta">
+          <span>{item.mime_type}</span>
+          <StatusPill label={item.change_type} tone={outputChangeTone(item.change_type)} />
+        </div>
+      </div>
+      <div className="output-image-frame">
+        <Image
+          alt={`Notebook output image (${item.mime_type})`}
+          className="output-image"
+          height={item.height ?? 675}
+          loading="lazy"
+          src={buildApiHref(`/api/review-assets/${item.asset_id}`)}
+          unoptimized
+          width={item.width ?? 1200}
+        />
+      </div>
+      <p className="muted-copy">
+        {item.width && item.height
+          ? `${item.width} x ${item.height} px`
+          : "Dimensions unavailable"}
+      </p>
+    </article>
   );
 }
 
@@ -569,6 +632,8 @@ function ThreadCard({
   thread: ReviewThread;
   currentPath: string;
 }) {
+  const mirrorStatus = summarizeGitHubMirrorStatus(thread);
+
   return (
     <article className="thread-card">
       <div className="thread-head">
@@ -576,12 +641,52 @@ function ThreadCard({
         {thread.carried_forward ? <StatusPill label="carried forward" tone="accent" /> : null}
       </div>
 
+      <section className="mirror-card">
+        <div className="mirror-head">
+          <div>
+            <p className="eyebrow">GitHub Mirror</p>
+            <h6>{mirrorStatus.label}</h6>
+          </div>
+          <StatusPill label={mirrorStatus.label} tone={mirrorStatus.tone} />
+        </div>
+        <p className="muted-copy">{mirrorStatus.description}</p>
+        <div className="mirror-links">
+          {thread.github_root_comment_url && mirrorStatus.linkLabel ? (
+            <a
+              className="text-link"
+              href={thread.github_root_comment_url}
+              rel="noreferrer"
+              target="_blank"
+            >
+              {mirrorStatus.linkLabel}
+            </a>
+          ) : null}
+          {thread.github_last_mirrored_at ? (
+            <span className="muted-copy">
+              Last update {formatTimestamp(thread.github_last_mirrored_at)}
+            </span>
+          ) : null}
+        </div>
+      </section>
+
       <div className="message-stack">
         {thread.messages.map((message) => (
           <div className="message-card" key={message.id}>
             <div className="message-meta">
               <strong>{message.author_login}</strong>
-              <span>{formatTimestamp(message.created_at)}</span>
+              <div className="message-meta-links">
+                <span>{formatTimestamp(message.created_at)}</span>
+                {message.github_reply_comment_url ? (
+                  <a
+                    className="text-link"
+                    href={message.github_reply_comment_url}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    Mirrored reply
+                  </a>
+                ) : null}
+              </div>
             </div>
             <p className="message-body">{message.body_markdown}</p>
           </div>
@@ -681,4 +786,17 @@ function threadTone(status: ReviewThread["status"]): "accent" | "success" | "war
     return "warning";
   }
   return "accent";
+}
+
+
+function outputChangeTone(
+  changeType: "added" | "removed" | "modified",
+): "accent" | "warning" | "default" {
+  if (changeType === "added") {
+    return "accent";
+  }
+  if (changeType === "removed") {
+    return "warning";
+  }
+  return "default";
 }

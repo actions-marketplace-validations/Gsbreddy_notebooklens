@@ -13,6 +13,10 @@ from sqlalchemy.orm import Session, selectinload
 from src.review_core import SnapshotBlockKind
 
 from .models import (
+    GitHubMirrorAction,
+    GitHubMirrorJob,
+    GitHubMirrorJobState,
+    GitHubMirrorState,
     ManagedReview,
     InstallationRepository,
     NotificationDeliveryState,
@@ -25,7 +29,7 @@ from .models import (
     ThreadMessage,
     UserSession,
 )
-from .oauth import GitHubOAuthClient, OAuthSessionStore
+from .oauth import GitHubOAuthClient, OAuthSessionStore, SessionCipherError
 
 
 VALID_THREAD_BLOCK_KINDS: tuple[SnapshotBlockKind, ...] = ("source", "outputs", "metadata")
@@ -52,8 +56,112 @@ class ThreadCounts:
     outdated: int = 0
 
 
+@dataclass(frozen=True)
+class MirrorAuthContext:
+    """Resolved GitHub authorship context for future mirror writes."""
+
+    mode: str
+    access_token: str | None
+    github_user_id: int
+    github_login: str | None
+    fallback_reason: str | None = None
+
+
 def _touch_review(review: ManagedReview) -> None:
     review.updated_at = datetime.now(timezone.utc)
+
+
+def enqueue_github_mirror_job(
+    *,
+    db_session: Session,
+    managed_review_id: uuid.UUID,
+    action: GitHubMirrorAction,
+    thread_id: uuid.UUID | None = None,
+    thread_message_id: uuid.UUID | None = None,
+) -> GitHubMirrorJob:
+    existing_job = db_session.execute(
+        select(GitHubMirrorJob)
+        .where(
+            GitHubMirrorJob.managed_review_id == managed_review_id,
+            GitHubMirrorJob.thread_id == thread_id,
+            GitHubMirrorJob.thread_message_id == thread_message_id,
+            GitHubMirrorJob.action == action,
+            GitHubMirrorJob.state.in_(
+                (
+                    GitHubMirrorJobState.PENDING,
+                    GitHubMirrorJobState.PROCESSING,
+                )
+            ),
+        )
+        .order_by(GitHubMirrorJob.created_at.asc(), GitHubMirrorJob.id.asc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if existing_job is not None:
+        return existing_job
+
+    job = GitHubMirrorJob(
+        managed_review_id=managed_review_id,
+        thread_id=thread_id,
+        thread_message_id=thread_message_id,
+        action=action,
+        state=GitHubMirrorJobState.PENDING,
+        attempt_count=0,
+        last_error=None,
+        processed_at=None,
+    )
+    db_session.add(job)
+    db_session.flush()
+    return job
+
+
+def claim_next_github_mirror_job(
+    *,
+    db_session: Session,
+    now: datetime | None = None,
+) -> GitHubMirrorJob | None:
+    current_time = now or datetime.now(timezone.utc)
+    job = db_session.execute(
+        select(GitHubMirrorJob)
+        .where(GitHubMirrorJob.state == GitHubMirrorJobState.PENDING)
+        .order_by(GitHubMirrorJob.created_at.asc(), GitHubMirrorJob.id.asc())
+        .with_for_update(skip_locked=True)
+        .limit(1)
+    ).scalar_one_or_none()
+    if job is None:
+        return None
+    job.state = GitHubMirrorJobState.PROCESSING
+    job.attempt_count += 1
+    job.last_error = None
+    job.processed_at = None
+    db_session.flush()
+    return job
+
+
+def mark_github_mirror_job_sent(
+    *,
+    db_session: Session,
+    job: GitHubMirrorJob,
+    processed_at: datetime | None = None,
+) -> GitHubMirrorJob:
+    job.state = GitHubMirrorJobState.SENT
+    job.last_error = None
+    job.processed_at = processed_at or datetime.now(timezone.utc)
+    db_session.flush()
+    return job
+
+
+def mark_github_mirror_job_failed(
+    *,
+    db_session: Session,
+    job: GitHubMirrorJob,
+    error_message: str,
+    processed_at: datetime | None = None,
+) -> GitHubMirrorJob:
+    job.state = GitHubMirrorJobState.FAILED
+    job.last_error = error_message
+    job.processed_at = processed_at or datetime.now(timezone.utc)
+    db_session.flush()
+    return job
 
 
 def count_review_threads(*, db_session: Session, managed_review_id: uuid.UUID) -> ThreadCounts:
@@ -81,6 +189,9 @@ def load_review_by_route(
     review = db_session.execute(
         select(ManagedReview)
         .options(
+            selectinload(ManagedReview.installation_repository).selectinload(
+                InstallationRepository.installation
+            ),
             selectinload(ManagedReview.review_snapshots),
             selectinload(ManagedReview.review_threads).selectinload(ReviewThread.messages),
         )
@@ -139,9 +250,16 @@ def get_workspace_payload(
             "pull_number": review.pull_number,
             "base_branch": review.base_branch,
             "status": review.status.value,
+            "installation": {
+                "id": str(review.installation_repository.installation.id),
+                "account_login": review.installation_repository.installation.account_login,
+                "account_type": review.installation_repository.installation.account_type.value,
+            },
             "latest_snapshot_id": str(review.latest_snapshot_id) if review.latest_snapshot_id else None,
             "latest_snapshot_index": latest_snapshot_index,
             "selected_snapshot_index": selected_snapshot.snapshot_index if selected_snapshot else None,
+            "github_workspace_comment_id": review.github_workspace_comment_id,
+            "github_workspace_comment_url": review.github_workspace_comment_url,
             "thread_counts": {
                 "unresolved": counts.unresolved,
                 "resolved": counts.resolved,
@@ -232,6 +350,15 @@ def create_thread(
         session_store=session_store,
     )
     db_session.flush()
+    thread.github_mirror_state = GitHubMirrorState.PENDING
+    thread.github_mirror_metadata_json = {}
+    enqueue_github_mirror_job(
+        db_session=db_session,
+        managed_review_id=review.id,
+        thread_id=thread.id,
+        thread_message_id=message.id,
+        action=GitHubMirrorAction.CREATE_THREAD,
+    )
     return _load_thread(db_session=db_session, thread_id=thread.id)
 
 
@@ -270,6 +397,15 @@ def add_thread_message(
         session_store=session_store,
     )
     db_session.flush()
+    thread.github_mirror_state = GitHubMirrorState.PENDING
+    enqueue_github_mirror_job(
+        db_session=db_session,
+        managed_review_id=thread.managed_review_id,
+        thread_id=thread.id,
+        thread_message_id=message.id,
+        action=GitHubMirrorAction.REPLY,
+    )
+    db_session.flush()
     return _load_thread(db_session=db_session, thread_id=thread.id)
 
 
@@ -301,6 +437,14 @@ def resolve_thread(
         message_body_markdown=None,
         oauth_client=oauth_client,
         session_store=session_store,
+    )
+    db_session.flush()
+    thread.github_mirror_state = GitHubMirrorState.PENDING
+    enqueue_github_mirror_job(
+        db_session=db_session,
+        managed_review_id=thread.managed_review_id,
+        thread_id=thread.id,
+        action=GitHubMirrorAction.RESOLVE,
     )
     db_session.flush()
     return _load_thread(db_session=db_session, thread_id=thread.id)
@@ -339,6 +483,14 @@ def reopen_thread(
         message_body_markdown=None,
         oauth_client=oauth_client,
         session_store=session_store,
+    )
+    db_session.flush()
+    thread.github_mirror_state = GitHubMirrorState.PENDING
+    enqueue_github_mirror_job(
+        db_session=db_session,
+        managed_review_id=thread.managed_review_id,
+        thread_id=thread.id,
+        action=GitHubMirrorAction.REOPEN,
     )
     db_session.flush()
     return _load_thread(db_session=db_session, thread_id=thread.id)
@@ -684,6 +836,56 @@ def _resolve_known_email(
     return email.strip()
 
 
+def resolve_mirror_auth_context(
+    *,
+    db_session: Session,
+    github_user_id: int,
+    session_store: OAuthSessionStore,
+    now: datetime | None = None,
+) -> MirrorAuthContext:
+    current_time = now or datetime.now(timezone.utc)
+    session_candidates = db_session.execute(
+        select(UserSession)
+        .where(UserSession.github_user_id == github_user_id)
+        .order_by(UserSession.created_at.desc())
+    ).scalars().all()
+    session_record = next(
+        (
+            item
+            for item in session_candidates
+            if _ensure_utc(item.expires_at) >= current_time
+        ),
+        None,
+    )
+    if session_record is None:
+        return MirrorAuthContext(
+            mode="app",
+            access_token=None,
+            github_user_id=github_user_id,
+            github_login=None,
+            fallback_reason="user_token_unavailable",
+        )
+
+    try:
+        access_token = session_store.cipher.decrypt(session_record.access_token_encrypted)
+    except SessionCipherError:
+        return MirrorAuthContext(
+            mode="app",
+            access_token=None,
+            github_user_id=github_user_id,
+            github_login=session_record.github_login,
+            fallback_reason="user_token_unreadable",
+        )
+
+    return MirrorAuthContext(
+        mode="user",
+        access_token=access_token,
+        github_user_id=github_user_id,
+        github_login=session_record.github_login,
+        fallback_reason=None,
+    )
+
+
 def _select_snapshot(
     *,
     review: ManagedReview,
@@ -750,6 +952,11 @@ def _serialize_thread(
     *,
     snapshot_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
+    mirror_metadata = (
+        dict(thread.github_mirror_metadata_json)
+        if isinstance(thread.github_mirror_metadata_json, Mapping)
+        else {}
+    )
     return {
         "id": str(thread.id),
         "managed_review_id": str(thread.managed_review_id),
@@ -763,12 +970,28 @@ def _serialize_thread(
         "updated_at": thread.updated_at.isoformat(),
         "resolved_at": thread.resolved_at.isoformat() if thread.resolved_at else None,
         "resolved_by_github_user_id": thread.resolved_by_github_user_id,
+        "github_mirror": {
+            "state": thread.github_mirror_state.value,
+            "root_comment_id": thread.github_root_comment_id,
+            "root_comment_url": thread.github_root_comment_url,
+            "last_mirrored_at": (
+                thread.github_last_mirrored_at.isoformat()
+                if thread.github_last_mirrored_at
+                else None
+            ),
+            "mode": mirror_metadata.get("mode"),
+            "fallback_reason": mirror_metadata.get("fallback_reason"),
+            "target": mirror_metadata.get("target"),
+            "last_action": mirror_metadata.get("last_action"),
+        },
         "messages": [
             {
                 "id": str(message.id),
                 "author_github_user_id": message.author_github_user_id,
                 "author_login": message.author_login,
                 "body_markdown": message.body_markdown,
+                "github_reply_comment_id": message.github_reply_comment_id,
+                "github_reply_comment_url": message.github_reply_comment_url,
                 "created_at": message.created_at.isoformat(),
             }
             for message in thread.messages
@@ -801,6 +1024,9 @@ def _ensure_utc(value: datetime) -> datetime:
 
 
 __all__ = [
+    "claim_next_github_mirror_job",
+    "enqueue_github_mirror_job",
+    "MirrorAuthContext",
     "ReviewWorkspaceError",
     "ReviewWorkspaceNotFoundError",
     "ReviewWorkspaceValidationError",
@@ -815,8 +1041,11 @@ __all__ = [
     "load_review_by_id",
     "load_review_by_route",
     "load_thread_by_id",
+    "mark_github_mirror_job_failed",
+    "mark_github_mirror_job_sent",
     "normalize_thread_anchor",
     "reopen_thread",
+    "resolve_mirror_auth_context",
     "resolve_thread",
     "serialize_thread",
     "snapshot_contains_anchor",

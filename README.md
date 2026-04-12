@@ -6,7 +6,7 @@ Notebook-aware pull request review for Jupyter notebooks on GitHub. NotebookLens
 | Product | Enable it by | GitHub surface | What it does |
 |---|---|---|---|
 | OSS Action | Add `Gsbreddy/notebooklens@v0` to a workflow | Sticky PR comment keyed by `<!-- notebooklens-comment -->` | Summarizes notebook changes, flagged findings, and optional Claude output |
-| Hosted Review Workspace Beta | Install the NotebookLens GitHub App and sign in with GitHub OAuth | Dedicated `NotebookLens Review Workspace` check run | Opens a hosted PR review workspace with snapshot history and inline thread workflows |
+| Hosted Review Workspace Beta | Install the NotebookLens GitHub App and sign in with GitHub OAuth | Dedicated `NotebookLens Review Workspace` check run | Opens a managed PR review workspace with snapshot history, inline threads, GitHub PR sync, and a supported Docker Compose self-hosting path |
 
 The Action and the GitHub App have separate onboarding and separate GitHub surfaces. If both are enabled on the same PR, the Action keeps owning the sticky comment and the App keeps owning the dedicated check run. `.github/notebooklens.yml` remains shared review config for both.
 
@@ -46,9 +46,15 @@ jobs:
 
 ## Hosted Review Workspace Beta
 
-The hosted parity beta is a separate GitHub App + web app flow. It does not replace the OSS Action, and it does not add new public Action `with:` inputs.
+The managed `v0.4.0-beta` workspace is a separate GitHub App + web app flow. It does not replace the OSS Action, and it does not add new public Action `with:` inputs.
 
 Managed beta deployments use `APP_BASE_URL` as the shared public base URL for the hosted review UI and its `/api/...` routes.
+
+`v0.4.0-beta` adds a supported Docker Compose self-hosting path for internal pilots on GitHub.com and GitHub Enterprise Server (`3.20.0+`). Operator and admin docs:
+
+- [Self-hosting runbook](docs/self-hosting.md)
+- [LiteLLM admin settings](docs/admin-ai-settings.md)
+- [GitHub PR sync behavior](docs/github-pr-sync.md)
 
 1. Install the NotebookLens GitHub App on the repositories you want to review.
 2. Sign in to NotebookLens with GitHub OAuth.
@@ -56,9 +62,11 @@ Managed beta deployments use `APP_BASE_URL` as the shared public base URL for th
 4. Open the `NotebookLens Review Workspace` check run to launch the hosted review URL for the latest snapshot.
 5. Create, reply to, resolve, or reopen inline threads inside the hosted workspace.
 
-The beta is PR-only. This release does not support commit-only review, standalone notebook conversations, or native GitHub review comment sync.
+The beta is still PR-only. This release does not support commit-only review, standalone notebook conversations, bidirectional GitHub sync back into NotebookLens, or Helm/Kubernetes packaging.
 
-The managed beta uses deterministic local review only. There are no managed Claude/OpenAI provider settings in this release.
+Installation admins can now configure an installation-scoped LiteLLM gateway for managed review. If the gateway is unavailable, NotebookLens records the provider failure and falls back to deterministic local review.
+
+Hosted thread activity now mirrors into GitHub pull requests when NotebookLens can map the hosted anchor to a stable `.ipynb` diff position. The managed workspace remains the editable source of truth, and unmappable anchors fall back to the app-owned workspace comment on the PR discussion tab.
 
 To keep the hosted UI fast and stable across pushes, NotebookLens stores versioned normalized review snapshots per PR revision for 90 days by default. Those snapshots include changed-cell source text, limited neighboring context, output and metadata summaries, deterministic findings, reviewer guidance, and stable thread anchors. NotebookLens does not store untouched full notebook revisions wholesale for the hosted beta.
 
@@ -157,7 +165,8 @@ NotebookLens runs as a Docker GitHub Action triggered only on `pull_request` eve
 4. Signed-in reviewers open the hosted route from the check run after GitHub OAuth access checks pass for the repository.
 5. The hosted UI renders the latest snapshot, allows snapshot-history switching, and supports inline thread create/reply/resolve/reopen actions on changed notebook blocks.
 6. Unresolved threads are carried forward on a best-effort basis when anchors still match safely; otherwise they remain on older snapshots and are marked `outdated`.
-7. Email notifications are sent only to signed-in participants and the PR author when a usable email is available.
+7. Hosted thread create/reply/resolve/reopen events enqueue one-way GitHub mirroring: stable anchors become native PR review comments, and unmappable anchors are summarized in the app-owned workspace comment.
+8. Email notifications are sent only to signed-in participants and the PR author when a usable email is available.
 
 ## Inputs
 
@@ -190,7 +199,7 @@ Give the action step an `id` such as `id: notebooklens` if you want to read outp
     echo "Changed notebooks: ${{ steps.notebooklens.outputs.changed-notebooks }}"
 ```
 
-**Out of scope for `v0.3.0-beta`:** commit-only review, standalone notebook conversations outside pull requests, native GitHub review comment synchronization, self-hosting, billing/RBAC/SSO, extra public Action inputs, and managed Claude/OpenAI provider settings.
+**Out of scope for `v0.4.0-beta`:** commit-only review, standalone notebook conversations outside pull requests, Helm/Kubernetes packaging, billing/RBAC/SSO, bidirectional GitHub comment sync, extra public Action inputs, per-repo AI overrides, and managed provider support beyond LiteLLM.
 
 ## Reviewer Guidance Playbooks
 

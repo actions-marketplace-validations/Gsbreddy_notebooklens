@@ -15,6 +15,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     MetaData,
     String,
     Text,
@@ -67,11 +68,21 @@ class InstallationAccountType(str, Enum):
     ORGANIZATION = "organization"
 
 
+class GitHubHostKind(str, Enum):
+    GITHUB_COM = "github_com"
+    GHES = "ghes"
+
+
 class ManagedReviewStatus(str, Enum):
     PENDING = "pending"
     READY = "ready"
     FAILED = "failed"
     CLOSED = "closed"
+
+
+class ManagedAiGatewayProviderKind(str, Enum):
+    NONE = "none"
+    LITELLM = "litellm"
 
 
 class SnapshotBuildJobStatus(str, Enum):
@@ -107,6 +118,28 @@ class NotificationDeliveryState(str, Enum):
     FAILED = "failed"
 
 
+class GitHubMirrorAction(str, Enum):
+    UPSERT_WORKSPACE_COMMENT = "upsert_workspace_comment"
+    CREATE_THREAD = "create_thread"
+    REPLY = "reply"
+    RESOLVE = "resolve"
+    REOPEN = "reopen"
+
+
+class GitHubMirrorJobState(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    SENT = "sent"
+    FAILED = "failed"
+
+
+class GitHubMirrorState(str, Enum):
+    PENDING = "pending"
+    MIRRORED = "mirrored"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
 class GitHubInstallation(TimestampMixin, Base):
     __tablename__ = "github_installations"
 
@@ -121,6 +154,11 @@ class GitHubInstallation(TimestampMixin, Base):
     repositories: Mapped[list["InstallationRepository"]] = relationship(
         back_populates="installation",
         cascade="all, delete-orphan",
+    )
+    managed_ai_gateway_config: Mapped["ManagedAiGatewayConfig | None"] = relationship(
+        back_populates="installation",
+        cascade="all, delete-orphan",
+        uselist=False,
     )
 
 
@@ -179,6 +217,23 @@ class ManagedReview(TimestampMixin, Base):
         Uuid(as_uuid=True),
         nullable=True,
     )
+    github_workspace_comment_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    github_workspace_comment_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    github_host_kind: Mapped[GitHubHostKind] = mapped_column(
+        SqlEnum(GitHubHostKind, native_enum=False),
+        default=GitHubHostKind.GITHUB_COM,
+        nullable=False,
+    )
+    github_api_base_url: Mapped[str] = mapped_column(
+        String(512),
+        default="https://api.github.com",
+        nullable=False,
+    )
+    github_web_base_url: Mapped[str] = mapped_column(
+        String(512),
+        default="https://github.com",
+        nullable=False,
+    )
 
     installation_repository: Mapped[InstallationRepository] = relationship(
         back_populates="managed_reviews"
@@ -195,6 +250,10 @@ class ManagedReview(TimestampMixin, Base):
         back_populates="managed_review",
         cascade="all, delete-orphan",
     )
+    github_mirror_jobs: Mapped[list["GitHubMirrorJob"]] = relationship(
+        back_populates="managed_review",
+        cascade="all, delete-orphan",
+    )
 
 
 class SnapshotBuildJob(Base):
@@ -208,6 +267,7 @@ class SnapshotBuildJob(Base):
     )
     base_sha: Mapped[str] = mapped_column(String(255), nullable=False)
     head_sha: Mapped[str] = mapped_column(String(255), nullable=False)
+    force_rebuild: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[SnapshotBuildJobStatus] = mapped_column(
         SqlEnum(SnapshotBuildJobStatus, native_enum=False),
         default=SnapshotBuildJobStatus.QUEUED,
@@ -260,6 +320,10 @@ class ReviewSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     managed_review: Mapped[ManagedReview] = relationship(back_populates="review_snapshots")
+    review_assets: Mapped[list["ReviewAsset"]] = relationship(
+        back_populates="snapshot",
+        cascade="all, delete-orphan",
+    )
     origin_threads: Mapped[list["ReviewThread"]] = relationship(
         back_populates="origin_snapshot",
         foreign_keys="ReviewThread.origin_snapshot_id",
@@ -300,6 +364,18 @@ class ReviewThread(TimestampMixin, Base):
     created_by_github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_by_github_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    github_root_comment_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    github_root_comment_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    github_mirror_state: Mapped[GitHubMirrorState] = mapped_column(
+        SqlEnum(GitHubMirrorState, native_enum=False),
+        default=GitHubMirrorState.PENDING,
+        nullable=False,
+    )
+    github_mirror_metadata_json: Mapped[dict] = mapped_column(JSONVariant, default=dict, nullable=False)
+    github_last_mirrored_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     managed_review: Mapped[ManagedReview] = relationship(back_populates="review_threads")
     origin_snapshot: Mapped[ReviewSnapshot] = relationship(
@@ -319,6 +395,11 @@ class ReviewThread(TimestampMixin, Base):
         back_populates="thread",
         cascade="all, delete-orphan",
         order_by="NotificationOutbox.created_at",
+    )
+    github_mirror_jobs: Mapped[list["GitHubMirrorJob"]] = relationship(
+        back_populates="thread",
+        cascade="all, delete-orphan",
+        order_by="GitHubMirrorJob.created_at",
     )
 
 
@@ -346,9 +427,65 @@ class ThreadMessage(Base):
     author_github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     author_login: Mapped[str] = mapped_column(String(255), nullable=False)
     body_markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    github_reply_comment_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    github_reply_comment_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     thread: Mapped[ReviewThread] = relationship(back_populates="messages")
+    github_mirror_jobs: Mapped[list["GitHubMirrorJob"]] = relationship(
+        back_populates="thread_message",
+        order_by="GitHubMirrorJob.created_at",
+    )
+
+
+class GitHubMirrorJob(Base):
+    __tablename__ = "github_mirror_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    managed_review_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("managed_reviews.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    thread_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("review_threads.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    thread_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("thread_messages.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    action: Mapped[GitHubMirrorAction] = mapped_column(
+        SqlEnum(GitHubMirrorAction, native_enum=False),
+        nullable=False,
+    )
+    state: Mapped[GitHubMirrorJobState] = mapped_column(
+        SqlEnum(GitHubMirrorJobState, native_enum=False),
+        default=GitHubMirrorJobState.PENDING,
+        nullable=False,
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    managed_review: Mapped[ManagedReview] = relationship(back_populates="github_mirror_jobs")
+    thread: Mapped[ReviewThread | None] = relationship(back_populates="github_mirror_jobs")
+    thread_message: Mapped[ThreadMessage | None] = relationship(back_populates="github_mirror_jobs")
+
+
+Index(
+    "ix_github_mirror_jobs_state_created_at",
+    GitHubMirrorJob.state,
+    GitHubMirrorJob.created_at,
+)
+Index(
+    "ix_github_mirror_jobs_review_state",
+    GitHubMirrorJob.managed_review_id,
+    GitHubMirrorJob.state,
+)
 
 
 class NotificationOutbox(Base):
@@ -380,6 +517,74 @@ class NotificationOutbox(Base):
     thread: Mapped[ReviewThread] = relationship(back_populates="notifications")
 
 
+class ReviewAsset(Base):
+    __tablename__ = "review_assets"
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "sha256"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("review_snapshots.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    content_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    snapshot: Mapped[ReviewSnapshot] = relationship(back_populates="review_assets")
+
+
+class ManagedAiGatewayConfig(Base):
+    __tablename__ = "managed_ai_gateway_configs"
+    __table_args__ = (
+        UniqueConstraint("installation_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    installation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("github_installations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider_kind: Mapped[ManagedAiGatewayProviderKind] = mapped_column(
+        SqlEnum(ManagedAiGatewayProviderKind, native_enum=False),
+        nullable=False,
+    )
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    github_host_kind: Mapped[GitHubHostKind] = mapped_column(
+        SqlEnum(GitHubHostKind, native_enum=False),
+        nullable=False,
+    )
+    github_api_base_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    github_web_base_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    api_key_header_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    static_headers_encrypted_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    use_responses_api: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    litellm_virtual_key_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_by_github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+        nullable=False,
+    )
+
+    installation: Mapped[GitHubInstallation] = relationship(
+        back_populates="managed_ai_gateway_config"
+    )
+
+
 class UserSession(Base):
     __tablename__ = "user_sessions"
 
@@ -395,13 +600,21 @@ __all__ = [
     "ApiConfigurationError",
     "Base",
     "GitHubInstallation",
+    "GitHubMirrorAction",
+    "GitHubMirrorJob",
+    "GitHubMirrorJobState",
+    "GitHubMirrorState",
+    "GitHubHostKind",
     "InstallationAccountType",
     "InstallationRepository",
+    "ManagedAiGatewayConfig",
+    "ManagedAiGatewayProviderKind",
     "ManagedReview",
     "ManagedReviewStatus",
     "NotificationDeliveryState",
     "NotificationEventType",
     "NotificationOutbox",
+    "ReviewAsset",
     "ReviewThread",
     "ReviewThreadStatus",
     "ReviewSnapshot",

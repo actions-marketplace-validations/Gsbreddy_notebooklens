@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildAnchorKey,
+  buildAiGatewayRoute,
   buildFlashRedirect,
   canStartThread,
   groupThreadsByAnchor,
   isBlockChanged,
+  summarizeGitHubMirrorStatus,
 } from "@/lib/review-workspace";
 import type { RenderRow, ReviewSnapshotRecord, ReviewThread, WorkspaceReview } from "@/lib/types";
 
@@ -111,6 +113,11 @@ function buildReview(latestSnapshotId: string): WorkspaceReview {
     pull_number: 7,
     base_branch: "main",
     status: "ready",
+    installation: {
+      id: "installation-id",
+      account_login: "octo-org",
+      account_type: "organization",
+    },
     latest_snapshot_id: latestSnapshotId,
     latest_snapshot_index: 2,
     selected_snapshot_index: 2,
@@ -176,5 +183,26 @@ describe("review workspace helpers", () => {
 
     expect(isBlockChanged(row, "outputs")).toBe(true);
     expect(isBlockChanged(row, "metadata")).toBe(false);
+  });
+
+  it("builds the review-scoped LiteLLM settings route", () => {
+    expect(buildAiGatewayRoute("octo", "notebooklens", 7)).toBe(
+      "/reviews/octo/notebooklens/pulls/7/settings/ai-gateway",
+    );
+  });
+
+  it("summarizes mirrored GitHub threads", () => {
+    const thread = {
+      ...buildThread(buildRow()),
+      github_mirror_state: "mirrored" as const,
+      github_root_comment_url: "https://github.example.test/thread/1",
+    };
+
+    expect(summarizeGitHubMirrorStatus(thread)).toEqual({
+      label: "Mirrored to GitHub",
+      tone: "success",
+      description: "GitHub reviewers can open the mirrored PR thread directly.",
+      linkLabel: "Open mirrored PR thread",
+    });
   });
 });
