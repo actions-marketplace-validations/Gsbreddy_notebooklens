@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-beta] - 2026-04-13
+
 ### Added
 
 - Managed workspace operator docs for the supported Docker Compose self-hosting path, installation-scoped LiteLLM settings, and GitHub PR sync behavior in `v0.4.0-beta`.
