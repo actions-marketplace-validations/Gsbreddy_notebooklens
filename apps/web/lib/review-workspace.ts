@@ -87,6 +87,15 @@ export function buildSnapshotRoute(
 }
 
 
+export function buildAiGatewayRoute(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+): string {
+  return `/reviews/${owner}/${repo}/pulls/${pullNumber}/settings/ai-gateway`;
+}
+
+
 export function buildFlashRedirect(
   returnTo: string,
   notice: FlashNotice,
@@ -141,6 +150,65 @@ export function summarizeGuidance(
     guidance.source ??
     "Reviewer guidance"
   );
+}
+
+
+export function summarizeGitHubMirrorStatus(
+  thread: ReviewThread,
+): {
+  label: string;
+  tone: "default" | "accent" | "success" | "warning" | "danger";
+  description: string;
+  linkLabel: string | null;
+} {
+  if (thread.github_mirror_state === "pending") {
+    return {
+      label: "GitHub sync pending",
+      tone: "accent",
+      description:
+        "NotebookLens recorded this thread first and is still waiting to mirror it to GitHub.",
+      linkLabel: null,
+    };
+  }
+
+  if (thread.github_mirror_state === "mirrored") {
+    return {
+      label: "Mirrored to GitHub",
+      tone: "success",
+      description: thread.github_root_comment_url
+        ? "GitHub reviewers can open the mirrored PR thread directly."
+        : "GitHub mirror activity exists, but this thread does not expose a direct PR comment link yet.",
+      linkLabel: thread.github_root_comment_url ? "Open mirrored PR thread" : null,
+    };
+  }
+
+  if (thread.github_mirror_state === "failed") {
+    return {
+      label: "GitHub sync failed",
+      tone: "danger",
+      description:
+        "NotebookLens remains the source of truth while GitHub mirroring needs attention.",
+      linkLabel: null,
+    };
+  }
+
+  if (thread.github_mirror_state === "skipped") {
+    return {
+      label: "GitHub sync skipped",
+      tone: "warning",
+      description:
+        "This hosted anchor was not mirrored into a native GitHub PR comment, so continue in NotebookLens.",
+      linkLabel: null,
+    };
+  }
+
+  return {
+    label: "GitHub sync not recorded",
+    tone: "default",
+    description:
+      "Mirror status metadata is not available for this thread yet. NotebookLens remains the canonical discussion surface.",
+    linkLabel: null,
+  };
 }
 
 

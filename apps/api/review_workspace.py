@@ -92,6 +92,9 @@ def load_review_by_route(
     review = db_session.execute(
         select(ManagedReview)
         .options(
+            selectinload(ManagedReview.installation_repository).selectinload(
+                InstallationRepository.installation
+            ),
             selectinload(ManagedReview.review_snapshots),
             selectinload(ManagedReview.review_threads).selectinload(ReviewThread.messages),
         )
@@ -150,6 +153,11 @@ def get_workspace_payload(
             "pull_number": review.pull_number,
             "base_branch": review.base_branch,
             "status": review.status.value,
+            "installation": {
+                "id": str(review.installation_repository.installation.id),
+                "account_login": review.installation_repository.installation.account_login,
+                "account_type": review.installation_repository.installation.account_type.value,
+            },
             "latest_snapshot_id": str(review.latest_snapshot_id) if review.latest_snapshot_id else None,
             "latest_snapshot_index": latest_snapshot_index,
             "selected_snapshot_index": selected_snapshot.snapshot_index if selected_snapshot else None,
