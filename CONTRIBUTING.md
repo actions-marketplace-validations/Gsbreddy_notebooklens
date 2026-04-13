@@ -28,11 +28,14 @@ python -m pip install -e ".[dev]"
 Run the full local validation suite before opening a pull request:
 
 ```bash
+python -m mkdocs build --strict
 pytest
 python3 -m py_compile src/*.py
 docker build -t notebooklens-local .
 git diff --check
 ```
+
+The published documentation site is deployed from `main` through the `Docs Pages` workflow and serves the MkDocs build from `mkdocs.yml`.
 
 ## Repository Layout
 
@@ -53,11 +56,13 @@ git diff --check
 
 1. Merge the release-ready branch into `main`.
 2. Open the Actions tab and run the `Release` workflow on `main`.
-3. Provide a version input in `0.x.y` form, for example `0.2.0`.
+3. Provide a version input in `0.x.y` form, for example `0.4.0`.
 4. Verify:
    - tag `v0.x.y` exists
    - floating tag `v0` points to the same commit
    - GitHub Release notes match `CHANGELOG.md`
+
+The current release workflow accepts only `0.x.y` version inputs. Changelog or docs references to an upcoming beta line such as `v0.4.1-beta` are planning markers until a matching prerelease tagging flow is added.
 
 ## Community Standards
 

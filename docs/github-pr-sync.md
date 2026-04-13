@@ -2,6 +2,21 @@
 
 NotebookLens `v0.4.0-beta` mirrors managed workspace thread activity into GitHub pull requests, while keeping the hosted workspace as the source of truth.
 
+## Use this guide when
+
+Use this page if your team wants to understand what the hosted workspace writes back to GitHub and why some thread activity becomes inline PR review comments while other activity stays in the workspace comment fallback.
+
+If you are still setting up the deployment itself, start with [self-hosting.md](self-hosting.md). If you are only evaluating the managed beta flow, start with [quickstart-workspace.md](quickstart-workspace.md).
+
+## Where this fits
+
+The operator path around GitHub sync is:
+
+1. Deploy and verify the workspace with [self-hosting.md](self-hosting.md).
+2. Optional: configure managed LiteLLM review with [admin-ai-settings.md](admin-ai-settings.md).
+3. Use this page to understand the GitHub mirror contract, authorship rules, fallback behavior, and UI status states.
+4. Use [troubleshooting.md](troubleshooting.md) when sync status stays pending, fallback comments appear unexpectedly, or mirrored authorship does not match the acting reviewer.
+
 ## What sync does
 
 - Maintains one app-authored workspace comment on the PR discussion tab
@@ -49,6 +64,8 @@ Fallback entries include:
 - anchor context
 - a direct link back to the hosted thread
 
+This fallback is part of the normal `v0.4.0-beta` contract, not a data-loss path.
+
 ## Authorship behavior
 
 - NotebookLens uses the acting reviewer's stored GitHub token when it is available and valid.
@@ -77,3 +94,11 @@ Those states are informational only. NotebookLens remains the canonical editable
 2. Verify the GitHub App installation still has pull-request write access on the target repositories.
 3. Encourage reviewers to keep their GitHub OAuth tokens fresh if you want mirrored authorship to match the acting reviewer.
 4. Treat the workspace comment as the fallback surface for unmappable notebook anchors, not as an error by itself.
+
+## Related docs
+
+- [quickstart-workspace.md](quickstart-workspace.md)
+- [self-hosting.md](self-hosting.md)
+- [admin-ai-settings.md](admin-ai-settings.md)
+- [privacy.md](privacy.md)
+- [troubleshooting.md](troubleshooting.md)

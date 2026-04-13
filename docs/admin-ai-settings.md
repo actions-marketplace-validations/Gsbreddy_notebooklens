@@ -2,6 +2,21 @@
 
 NotebookLens `v0.4.0-beta` supports one managed AI gateway shape: an installation-scoped LiteLLM configuration.
 
+## Use this guide when
+
+Use this page after the managed workspace is already deployed and reviewers can open hosted reviews.
+
+If you still need to bring up the stack or finish GitHub App + OAuth wiring, start with [self-hosting.md](self-hosting.md).
+
+## Where this fits
+
+The managed AI setup path is:
+
+1. Deploy the hosted workspace with [self-hosting.md](self-hosting.md).
+2. Configure LiteLLM from this page if your installation should use managed AI review.
+3. Use [github-pr-sync.md](github-pr-sync.md) if you also need to understand how hosted review activity mirrors back into GitHub.
+4. Use [troubleshooting.md](troubleshooting.md) if connection tests or managed review fallbacks do not behave as expected.
+
 ## Scope and permissions
 
 - The setting is installation-scoped, not per repository.
@@ -23,6 +38,8 @@ You also need:
 - a reachable LiteLLM-compatible base URL
 - a model name exposed by that gateway
 - the API key and any optional static routing headers your gateway requires
+
+For the higher-level evaluator flow, see [quickstart-workspace.md](quickstart-workspace.md). For privacy and storage behavior, see [privacy.md](privacy.md).
 
 ## What the admin UI stores
 
@@ -71,3 +88,9 @@ Secrets are stored encrypted. Read APIs redact secret values and only expose whe
 - Connection test fails: verify the base URL, API key header name, API key value, and any required static headers.
 - GitHub host values do not match the installation: update the GitHub host kind plus API/web URLs before saving.
 - Reviews keep falling back deterministically: check the stored gateway configuration and worker logs for LiteLLM request failures.
+
+For broader deployment or sync troubleshooting, continue with:
+
+- [self-hosting.md](self-hosting.md)
+- [github-pr-sync.md](github-pr-sync.md)
+- [troubleshooting.md](troubleshooting.md)

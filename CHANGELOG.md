@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Docs adoption hardening is queued for the upcoming `v0.4.1-beta` line: a clearer README start path, dedicated quick-start guides, centralized privacy and troubleshooting docs, stronger static examples, tighter operator-doc navigation, and lightweight docs validation. This is documentation-only and does not change the currently shipped `v0.4.0-beta` product behavior.
+
 ## [0.4.0-beta] - 2026-04-13
 
 ### Added

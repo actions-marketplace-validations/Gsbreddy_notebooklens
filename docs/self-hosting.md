@@ -4,6 +4,21 @@ NotebookLens `v0.4.0-beta` supports one operator path for internal pilots: Docke
 
 This runbook covers the managed PR review workspace only. The OSS GitHub Action remains unchanged and can run with or without the managed stack.
 
+## Use this guide when
+
+Use this page if your team wants to deploy the hosted review workspace itself.
+
+If you are only evaluating the beta as a reviewer, start with [quickstart-workspace.md](quickstart-workspace.md) first.
+
+## Operator path at a glance
+
+The shortest operator path through the managed docs is:
+
+1. Use this page to bring up the stack and finish GitHub App + OAuth wiring.
+2. Use [admin-ai-settings.md](admin-ai-settings.md) if you want installation-scoped LiteLLM review.
+3. Use [github-pr-sync.md](github-pr-sync.md) if you need to understand how hosted thread activity appears back in GitHub.
+4. Use [troubleshooting.md](troubleshooting.md) if deployment health, sign-in, or sync behavior does not match expectations.
+
 ## What `v0.4.0-beta` supports
 
 - Docker Compose deployment on a single host
@@ -125,6 +140,16 @@ The self-hosted operator path and the admin feature path are separate:
 - `SNAPSHOT_RETENTION_DAYS` defaults to `90`; tune it intentionally if operators need a shorter retention window.
 - Keep `APP_BASE_URL` stable. The managed UI, API routes, and GitHub links all assume one shared public origin.
 
+## If something does not work
+
+Use [troubleshooting.md](troubleshooting.md) for:
+
+- stack-health checks
+- missing check runs
+- GitHub OAuth access problems
+- LiteLLM fallback behavior
+- GitHub PR sync delays or fallback comments
+
 ## CI coverage
 
 GitHub Actions validates the managed deployment artifacts by:
@@ -134,3 +159,11 @@ GitHub Actions validates the managed deployment artifacts by:
 - rendering `deploy/docker-compose.yml` with `deploy/.env.example`
 
 That CI job is a config/build smoke test. It does not replace an operator smoke deployment with real GitHub credentials.
+
+## Related docs
+
+- [quickstart-workspace.md](quickstart-workspace.md)
+- [admin-ai-settings.md](admin-ai-settings.md)
+- [github-pr-sync.md](github-pr-sync.md)
+- [privacy.md](privacy.md)
+- [troubleshooting.md](troubleshooting.md)

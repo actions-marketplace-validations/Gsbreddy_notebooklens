@@ -1,18 +1,35 @@
 # NotebookLens
 [![pytest](https://github.com/Gsbreddy/notebooklens/actions/workflows/ci.yml/badge.svg)](https://github.com/Gsbreddy/notebooklens/actions/workflows/ci.yml)
+[![docs](https://github.com/Gsbreddy/notebooklens/actions/workflows/docs-pages.yml/badge.svg)](https://github.com/Gsbreddy/notebooklens/actions/workflows/docs-pages.yml)
 
 Notebook-aware pull request review for Jupyter notebooks on GitHub. NotebookLens ships as two separate products that can coexist on the same PR: an OSS GitHub Action that posts one auto-updating PR comment with notebook-local reviewer guidance and optional Claude AI summaries, and an optional hosted review workspace beta that opens from a dedicated check run for notebook-aware diffs and inline threads.
 
-| Product | Enable it by | GitHub surface | What it does |
-|---|---|---|---|
-| OSS Action | Add `Gsbreddy/notebooklens@v0` to a workflow | Sticky PR comment keyed by `<!-- notebooklens-comment -->` | Summarizes notebook changes, flagged findings, and optional Claude output |
-| Hosted Review Workspace Beta | Install the NotebookLens GitHub App and sign in with GitHub OAuth | Dedicated `NotebookLens Review Workspace` check run | Opens a managed PR review workspace with snapshot history, inline threads, GitHub PR sync, and a supported Docker Compose self-hosting path |
+Start with the published docs: [gsbreddy.github.io/notebooklens](https://gsbreddy.github.io/notebooklens/)
+
+## Start Here
+
+If you are evaluating NotebookLens for the first time, start with the OSS Action.
+
+- Use the **OSS Action** if you want the fastest path to notebook-aware PR review inside GitHub. It takes a few minutes to install, works with `ai-provider: none`, and gives you one sticky PR comment with notebook change summaries and reviewer guidance.
+- Use the **Hosted Review Workspace Beta** if your DS/ML team wants a deeper review surface with snapshot history, visual notebook diffs, inline threads, GitHub PR sync, and a supported self-hosting path.
+- Use **both** if you want a lightweight PR summary comment and a separate hosted review experience on the same pull request. They keep separate GitHub surfaces and separate onboarding.
 
 The Action and the GitHub App have separate onboarding and separate GitHub surfaces. If both are enabled on the same PR, the Action keeps owning the sticky comment and the App keeps owning the dedicated check run. `.github/notebooklens.yml` remains shared review config for both.
 
+## Choose Your Path
+
+| Product | Enable it by | GitHub surface | What it does |
+|---|---|---|---|
+| OSS Action | Add `Gsbreddy/notebooklens@v0` to a workflow | Sticky PR comment keyed by `<!-- notebooklens-comment -->` | Recommended first install for most teams. Summarizes notebook changes, flagged findings, and optional Claude output. |
+| Hosted Review Workspace Beta | Install the NotebookLens GitHub App and sign in with GitHub OAuth | Dedicated `NotebookLens Review Workspace` check run | Separate beta workflow for deeper review: managed notebook diffs, inline threads, GitHub PR sync, and a supported Docker Compose self-hosting path. |
+
+Pick the Action first if your goal is "show me notebook-aware review inside GitHub quickly." Pick the hosted workspace beta when the team needs a richer review loop than a PR comment can provide.
+
 ## OSS Action Quick Start
 
-Use this first. It needs no AI key, sends nothing to external model providers, and still includes built-in reviewer guidance for changed notebooks.
+Recommended first install for most teams. It needs no AI key, sends nothing to external model providers in `none` mode, and still includes built-in reviewer guidance for changed notebooks.
+
+Prefer a step-by-step guide? Start with [docs/quickstart-action.md](docs/quickstart-action.md).
 
 ```yaml
 name: NotebookLens
@@ -40,21 +57,23 @@ jobs:
           redact-emails: true
 ```
 
-**Note:** `Gsbreddy/notebooklens@v0` references the published action. Use `@v0` to track the latest v0.x release, or pin to a specific tag like `@v0.2.0`. See the [Releases](https://github.com/Gsbreddy/notebooklens/releases) page for available tags.
+**Note:** `Gsbreddy/notebooklens@v0` references the published action. Use `@v0` to track the latest published v0.x release, or pin to a specific published tag from the [Releases](https://github.com/Gsbreddy/notebooklens/releases) page.
 
 `GITHUB_TOKEN` is the built-in Actions token used to read PR file metadata and create or update the review comment. No extra setup is required — GitHub provides it automatically in every workflow run.
 
-## Hosted Review Workspace Beta
+After install, NotebookLens adds one sticky PR comment. That comment is the entire OSS Action surface: it updates in place on new pushes, includes reviewer guidance even in `none` mode, and optionally includes Claude output when enabled.
+
+Want to preview the review surfaces before installing anything? See [docs/examples.md](docs/examples.md).
+
+For the full setup flow, validation checklist, and next steps like Claude mode or repo playbooks, use [docs/quickstart-action.md](docs/quickstart-action.md).
+
+## Hosted Review Workspace Beta Quick Start
 
 The managed `v0.4.0-beta` workspace is a separate GitHub App + web app flow. It does not replace the OSS Action, and it does not add new public Action `with:` inputs.
 
+Prefer the DS/ML-team-first setup guide? Start with [docs/quickstart-workspace.md](docs/quickstart-workspace.md).
+
 Managed beta deployments use `APP_BASE_URL` as the shared public base URL for the hosted review UI and its `/api/...` routes.
-
-`v0.4.0-beta` adds a supported Docker Compose self-hosting path for internal pilots on GitHub.com and GitHub Enterprise Server (`3.20.0+`). Operator and admin docs:
-
-- [Self-hosting runbook](docs/self-hosting.md)
-- [LiteLLM admin settings](docs/admin-ai-settings.md)
-- [GitHub PR sync behavior](docs/github-pr-sync.md)
 
 1. Install the NotebookLens GitHub App on the repositories you want to review.
 2. Sign in to NotebookLens with GitHub OAuth.
@@ -64,11 +83,25 @@ Managed beta deployments use `APP_BASE_URL` as the shared public base URL for th
 
 The beta is still PR-only. This release does not support commit-only review, standalone notebook conversations, bidirectional GitHub sync back into NotebookLens, or Helm/Kubernetes packaging.
 
-Installation admins can now configure an installation-scoped LiteLLM gateway for managed review. If the gateway is unavailable, NotebookLens records the provider failure and falls back to deterministic local review.
+For the full beta quick start, operator links, and deployment details, use [docs/quickstart-workspace.md](docs/quickstart-workspace.md).
 
-Hosted thread activity now mirrors into GitHub pull requests when NotebookLens can map the hosted anchor to a stable `.ipynb` diff position. The managed workspace remains the editable source of truth, and unmappable anchors fall back to the app-owned workspace comment on the PR discussion tab.
+## What You'll See
 
-To keep the hosted UI fast and stable across pushes, NotebookLens stores versioned normalized review snapshots per PR revision for 90 days by default. Those snapshots include changed-cell source text, limited neighboring context, output and metadata summaries, deterministic findings, reviewer guidance, and stable thread anchors. NotebookLens does not store untouched full notebook revisions wholesale for the hosted beta.
+If you install the OSS Action, reviewers will see:
+
+- one sticky NotebookLens comment on the pull request
+- notebook-local summaries of changed cells, outputs, notices, and reviewer guidance
+- optional Claude summary output when `ai-provider: claude` succeeds
+
+If you enable the hosted workspace beta, reviewers will also see:
+
+- a dedicated `NotebookLens Review Workspace` check run
+- an `Open in NotebookLens` link into the hosted review UI
+- snapshot history, notebook-aware diffs, inline threads, and GitHub PR sync for hosted thread activity
+
+The two surfaces are complementary, not duplicates: the Action is the lightweight GitHub-native summary path, and the hosted workspace beta is the deeper collaborative review path.
+
+Prefer static examples of both surfaces first? See [docs/examples.md](docs/examples.md).
 
 ## Enable Claude (optional)
 
@@ -255,6 +288,8 @@ Claude mode includes all of the above plus AI-generated findings and optional AI
 
 ## Privacy & Storage Note
 
+Prefer one central page for Action vs hosted-workspace data flow, permissions, fork behavior, and limits? Use [docs/privacy.md](docs/privacy.md).
+
 - In `none` mode, NotebookLens performs local diff/review logic only and does not call external AI APIs.
 - In `claude` mode, NotebookLens sends redaction-processed review payload data to Anthropic.
 - In the hosted parity beta, NotebookLens stores versioned normalized PR review snapshots for 90 days by default so the workspace can load quickly and keep thread state across pushes. It does not store untouched full notebook revisions wholesale.
@@ -308,6 +343,8 @@ Unsupported events do not emit `notebooklens.comment_sync` because comment sync 
 
 ## Troubleshooting
 
+Prefer one central troubleshooting path for the Action and the hosted workspace beta? Use [docs/troubleshooting.md](docs/troubleshooting.md).
+
 `No comment appears on a PR`
 - Confirm event is `pull_request` with one of: `opened`, `synchronize`, `reopened`.
 - Confirm at least one changed file ends in `.ipynb`.
@@ -347,6 +384,14 @@ See [.github/notebooklens-pr.example.yml](.github/notebooklens-pr.example.yml) f
 
 ## Project Docs
 
+- [docs/quickstart-action.md](docs/quickstart-action.md) for the shortest OSS Action install path
+- [docs/quickstart-workspace.md](docs/quickstart-workspace.md) for the hosted workspace beta quick start
+- [docs/privacy.md](docs/privacy.md) for data flow, permissions, fork behavior, and hard limits
+- [docs/troubleshooting.md](docs/troubleshooting.md) for common first-run and operator debugging paths
+- [docs/examples.md](docs/examples.md) for static OSS Action and hosted-workspace examples
+- [docs/self-hosting.md](docs/self-hosting.md) for the Docker Compose managed-workspace runbook
+- [docs/admin-ai-settings.md](docs/admin-ai-settings.md) for installation-scoped LiteLLM configuration
+- [docs/github-pr-sync.md](docs/github-pr-sync.md) for the GitHub mirror contract and fallback behavior
 - [CHANGELOG.md](CHANGELOG.md) for release notes
 - [SECURITY.md](SECURITY.md) for vulnerability reporting
 - [CONTRIBUTING.md](CONTRIBUTING.md) for local development and release process
