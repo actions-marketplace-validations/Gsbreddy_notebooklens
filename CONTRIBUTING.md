@@ -13,7 +13,7 @@ Thanks for helping improve NotebookLens.
 ### Setup
 
 ```bash
-git clone https://github.com/Gsbreddy/notebooklens.git
+git clone https://github.com/notebooklens/notebooklens.git
 cd notebooklens
 
 python -m venv .venv

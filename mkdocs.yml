@@ -1,11 +1,11 @@
 site_name: NotebookLens
 site_description: Notebook-aware pull request review for Jupyter notebooks on GitHub
-repo_url: https://github.com/Gsbreddy/notebooklens
-site_url: https://gsbreddy.github.io/notebooklens/
+repo_url: https://github.com/notebooklens/notebooklens
+site_url: https://notebooklens.github.io/notebooklens/
 edit_uri: edit/main/docs/
 docs_dir: docs
 strict: true
-repo_name: Gsbreddy/notebooklens
+repo_name: notebooklens/notebooklens
 
 nav:
   - Home: index.md

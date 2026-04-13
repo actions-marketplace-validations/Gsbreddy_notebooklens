@@ -66,5 +66,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Docker action image now installs the declared Python dependencies during image build.
-- Public docs and examples now reference `Gsbreddy/notebooklens@v0` and document the exact `v0.1.0` pin option.
+- Public docs and examples now reference `notebooklens/notebooklens@v0` and document the exact `v0.1.0` pin option.
 - Package metadata and runtime version strings are aligned on `0.1.0`.

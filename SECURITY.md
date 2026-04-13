@@ -4,7 +4,7 @@
 
 NotebookLens uses GitHub-native private vulnerability reporting.
 
-- Open the repository's [Security Advisories](https://github.com/Gsbreddy/notebooklens/security/advisories) page.
+- Open the repository's [Security Advisories](https://github.com/notebooklens/notebooklens/security/advisories) page.
 - Use the **Report a vulnerability** flow to send a private report.
 - Do **not** open a public issue for security-sensitive findings.
 

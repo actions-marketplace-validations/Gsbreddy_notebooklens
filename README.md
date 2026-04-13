@@ -1,16 +1,16 @@
 # NotebookLens
-[![pytest](https://github.com/Gsbreddy/notebooklens/actions/workflows/ci.yml/badge.svg)](https://github.com/Gsbreddy/notebooklens/actions/workflows/ci.yml)
-[![docs](https://github.com/Gsbreddy/notebooklens/actions/workflows/docs-pages.yml/badge.svg)](https://github.com/Gsbreddy/notebooklens/actions/workflows/docs-pages.yml)
+[![pytest](https://github.com/notebooklens/notebooklens/actions/workflows/ci.yml/badge.svg)](https://github.com/notebooklens/notebooklens/actions/workflows/ci.yml)
+[![docs](https://github.com/notebooklens/notebooklens/actions/workflows/docs-pages.yml/badge.svg)](https://github.com/notebooklens/notebooklens/actions/workflows/docs-pages.yml)
 
 Notebook-aware pull request review for Jupyter notebooks on GitHub. NotebookLens ships as two separate products that can coexist on the same PR: an OSS GitHub Action that posts one auto-updating PR comment with notebook-local reviewer guidance and optional Claude AI summaries, and an optional hosted review workspace beta that opens from a dedicated check run for notebook-aware diffs and inline threads.
 
-Start with the published docs: [gsbreddy.github.io/notebooklens](https://gsbreddy.github.io/notebooklens/)
+Start with the published docs: [notebooklens.github.io/notebooklens](https://notebooklens.github.io/notebooklens/)
 
 Most users only need three pages:
 
-- [OSS Action quick start](https://gsbreddy.github.io/notebooklens/quickstart-action/) for the fastest first install
-- [Hosted workspace beta quick start](https://gsbreddy.github.io/notebooklens/quickstart-workspace/) for the richer review flow
-- [Examples](https://gsbreddy.github.io/notebooklens/examples/) if you want to see both surfaces before setup
+- [OSS Action quick start](https://notebooklens.github.io/notebooklens/quickstart-action/) for the fastest first install
+- [Hosted workspace beta quick start](https://notebooklens.github.io/notebooklens/quickstart-workspace/) for the richer review flow
+- [Examples](https://notebooklens.github.io/notebooklens/examples/) if you want to see both surfaces before setup
 
 ## Start Here
 
@@ -26,10 +26,10 @@ The Action and the GitHub App have separate onboarding and separate GitHub surfa
 
 Use the GitHub Pages docs as the primary user guide:
 
-- [Docs home](https://gsbreddy.github.io/notebooklens/)
-- [Privacy and data flow](https://gsbreddy.github.io/notebooklens/privacy/)
-- [Troubleshooting](https://gsbreddy.github.io/notebooklens/troubleshooting/)
-- [Self-hosting](https://gsbreddy.github.io/notebooklens/self-hosting/)
+- [Docs home](https://notebooklens.github.io/notebooklens/)
+- [Privacy and data flow](https://notebooklens.github.io/notebooklens/privacy/)
+- [Troubleshooting](https://notebooklens.github.io/notebooklens/troubleshooting/)
+- [Self-hosting](https://notebooklens.github.io/notebooklens/self-hosting/)
 
 This README is the shortest repo-level overview plus a reference section for people who prefer to stay on GitHub.
 
@@ -37,8 +37,8 @@ This README is the shortest repo-level overview plus a reference section for peo
 
 | Product | Start here when | GitHub surface | Best next link |
 |---|---|---|---|
-| OSS Action | You want notebook-aware review inside GitHub in a few minutes | Sticky PR comment keyed by `<!-- notebooklens-comment -->` | [Action quick start](https://gsbreddy.github.io/notebooklens/quickstart-action/) |
-| Hosted Review Workspace Beta | Your team wants snapshot history, inline threads, GitHub PR sync, and optional self-hosting | Dedicated `NotebookLens Review Workspace` check run | [Workspace quick start](https://gsbreddy.github.io/notebooklens/quickstart-workspace/) |
+| OSS Action | You want notebook-aware review inside GitHub in a few minutes | Sticky PR comment keyed by `<!-- notebooklens-comment -->` | [Action quick start](https://notebooklens.github.io/notebooklens/quickstart-action/) |
+| Hosted Review Workspace Beta | Your team wants snapshot history, inline threads, GitHub PR sync, and optional self-hosting | Dedicated `NotebookLens Review Workspace` check run | [Workspace quick start](https://notebooklens.github.io/notebooklens/quickstart-workspace/) |
 
 Pick the Action first if your goal is "show me notebook-aware review inside GitHub quickly." Pick the hosted workspace beta when the team needs a richer review loop than a PR comment can provide.
 
@@ -47,7 +47,7 @@ Pick the Action first if your goal is "show me notebook-aware review inside GitH
 Recommended first install for most teams. It needs no AI key, sends nothing to external model providers in `none` mode, and still includes built-in reviewer guidance for changed notebooks.
 
 Prefer the full step-by-step guide? Start with the published docs page:
-[OSS Action quick start](https://gsbreddy.github.io/notebooklens/quickstart-action/).
+[OSS Action quick start](https://notebooklens.github.io/notebooklens/quickstart-action/).
 
 ```yaml
 name: NotebookLens
@@ -66,7 +66,7 @@ jobs:
     steps:
       - id: notebooklens
         name: Run NotebookLens
-        uses: Gsbreddy/notebooklens@v0
+        uses: notebooklens/notebooklens@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
@@ -75,24 +75,24 @@ jobs:
           redact-emails: true
 ```
 
-**Note:** `Gsbreddy/notebooklens@v0` references the published action. Use `@v0` to track the latest published v0.x release, or pin to a specific published tag from the [Releases](https://github.com/Gsbreddy/notebooklens/releases) page.
+**Note:** `notebooklens/notebooklens@v0` references the published action. Use `@v0` to track the latest published v0.x release, or pin to a specific published tag from the [Releases](https://github.com/notebooklens/notebooklens/releases) page.
 
 `GITHUB_TOKEN` is the built-in Actions token used to read PR file metadata and create or update the review comment. No extra setup is required — GitHub provides it automatically in every workflow run.
 
 After install, NotebookLens adds one sticky PR comment. That comment is the entire OSS Action surface: it updates in place on new pushes, includes reviewer guidance even in `none` mode, and optionally includes Claude output when enabled.
 
 Want to preview the review surfaces before installing anything? See
-[Examples](https://gsbreddy.github.io/notebooklens/examples/).
+[Examples](https://notebooklens.github.io/notebooklens/examples/).
 
 For the full setup flow, validation checklist, and next steps like Claude mode or repo playbooks, use
-[OSS Action quick start](https://gsbreddy.github.io/notebooklens/quickstart-action/).
+[OSS Action quick start](https://notebooklens.github.io/notebooklens/quickstart-action/).
 
 ## Hosted Review Workspace Beta Quick Start
 
 The managed `v0.4.0-beta` workspace is a separate GitHub App + web app flow. It does not replace the OSS Action, and it does not add new public Action `with:` inputs.
 
 Prefer the DS/ML-team-first setup guide? Start with
-[Hosted workspace beta quick start](https://gsbreddy.github.io/notebooklens/quickstart-workspace/).
+[Hosted workspace beta quick start](https://notebooklens.github.io/notebooklens/quickstart-workspace/).
 
 Managed beta deployments use `APP_BASE_URL` as the shared public base URL for the hosted review UI and its `/api/...` routes.
 
@@ -105,7 +105,7 @@ Managed beta deployments use `APP_BASE_URL` as the shared public base URL for th
 The beta is still PR-only. This release does not support commit-only review, standalone notebook conversations, bidirectional GitHub sync back into NotebookLens, or Helm/Kubernetes packaging.
 
 For the full beta quick start, operator links, and deployment details, use
-[Hosted workspace beta quick start](https://gsbreddy.github.io/notebooklens/quickstart-workspace/).
+[Hosted workspace beta quick start](https://notebooklens.github.io/notebooklens/quickstart-workspace/).
 
 ## What You'll See
 
@@ -124,7 +124,7 @@ If you enable the hosted workspace beta, reviewers will also see:
 The two surfaces are complementary, not duplicates: the Action is the lightweight GitHub-native summary path, and the hosted workspace beta is the deeper collaborative review path.
 
 Prefer static examples of both surfaces first? See
-[Examples](https://gsbreddy.github.io/notebooklens/examples/).
+[Examples](https://notebooklens.github.io/notebooklens/examples/).
 
 ## If You Only Read One Thing
 
@@ -138,7 +138,7 @@ After `none` mode is useful for your PR triage flow, enable Claude for richer su
 
 ```yaml
 - name: Run NotebookLens (Claude mode)
-  uses: Gsbreddy/notebooklens@v0
+  uses: notebooklens/notebooklens@v0
   env:
     GITHUB_TOKEN: ${{ github.token }}
   with:
@@ -317,7 +317,7 @@ Claude mode includes all of the above plus AI-generated findings and optional AI
 
 ## Privacy & Storage Note
 
-Prefer one central page for Action vs hosted-workspace data flow, permissions, fork behavior, and limits? Use [Privacy and Data Flow](https://gsbreddy.github.io/notebooklens/privacy/).
+Prefer one central page for Action vs hosted-workspace data flow, permissions, fork behavior, and limits? Use [Privacy and Data Flow](https://notebooklens.github.io/notebooklens/privacy/).
 
 - In `none` mode, NotebookLens performs local diff/review logic only and does not call external AI APIs.
 - In `claude` mode, NotebookLens sends redaction-processed review payload data to Anthropic.
@@ -372,7 +372,7 @@ Unsupported events do not emit `notebooklens.comment_sync` because comment sync 
 
 ## Troubleshooting
 
-Prefer one central troubleshooting path for the Action and the hosted workspace beta? Use [Troubleshooting](https://gsbreddy.github.io/notebooklens/troubleshooting/).
+Prefer one central troubleshooting path for the Action and the hosted workspace beta? Use [Troubleshooting](https://notebooklens.github.io/notebooklens/troubleshooting/).
 
 `No comment appears on a PR`
 - Confirm event is `pull_request` with one of: `opened`, `synchronize`, `reopened`.
@@ -413,8 +413,8 @@ See [.github/notebooklens-pr.example.yml](.github/notebooklens-pr.example.yml) f
 
 ## Docs & Repo
 
-- [Docs home](https://gsbreddy.github.io/notebooklens/) for the main user-facing guide
-- [Examples](https://gsbreddy.github.io/notebooklens/examples/) if you want to preview the product surfaces first
+- [Docs home](https://notebooklens.github.io/notebooklens/) for the main user-facing guide
+- [Examples](https://notebooklens.github.io/notebooklens/examples/) if you want to preview the product surfaces first
 - [CHANGELOG.md](CHANGELOG.md) for release notes
 - [SECURITY.md](SECURITY.md) for vulnerability reporting
 - [CONTRIBUTING.md](CONTRIBUTING.md) for local development and release process

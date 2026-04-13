@@ -45,7 +45,7 @@ jobs:
     steps:
       - id: notebooklens
         name: Run NotebookLens
-        uses: Gsbreddy/notebooklens@v0
+        uses: notebooklens/notebooklens@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
@@ -88,7 +88,7 @@ After the baseline `none` mode flow is useful, you can add optional capabilities
 
 ```yaml
 - name: Run NotebookLens (Claude mode)
-  uses: Gsbreddy/notebooklens@v0
+  uses: notebooklens/notebooklens@v0
   env:
     GITHUB_TOKEN: ${{ github.token }}
   with:
