@@ -7,6 +7,9 @@ It has two product surfaces:
 - the **OSS GitHub Action**, which adds one sticky pull request comment
 - the **Hosted Review Workspace Beta**, which opens from a dedicated check run
 
+[:material-rocket-launch-outline: Start with the OSS Action](quickstart-action.md){ .md-button .md-button--primary }
+[:material-book-open-page-variant-outline: Browse examples](examples.md){ .md-button }
+
 ## Start here
 
 If you are new to NotebookLens, start with one of these two paths:
@@ -26,6 +29,21 @@ You can use both on the same pull request. They do not replace each other:
 
 - the Action owns the sticky comment
 - the hosted workspace owns the check run
+
+## What users usually want to know
+
+### "Do I need AI to get value?"
+
+No. The OSS Action works in `ai-provider: none`, and the hosted workspace stays deterministic when no LiteLLM config is active.
+
+### "What will reviewers actually see?"
+
+- **Action:** one sticky PR comment with notebook-aware summaries, reviewer guidance, and optional Claude output
+- **Hosted workspace beta:** one check run that opens snapshot history, visual notebook diffs, and inline threads
+
+### "Can I try this before setting it up?"
+
+Yes. Start with [Examples](examples.md) if you want to see both surfaces first.
 
 ## What most teams should do first
 
@@ -47,6 +65,9 @@ If your team is running the hosted workspace itself, continue with:
 - [Self-Hosting](self-hosting.md)
 - [LiteLLM Admin Settings](admin-ai-settings.md)
 - [GitHub PR Sync](github-pr-sync.md)
+
+!!! info "Hosted workspace status"
+    The hosted review workspace is still **beta** in `v0.4.1-beta`. Start with the OSS Action if your team wants the lowest-risk first install.
 
 ## Examples
 
