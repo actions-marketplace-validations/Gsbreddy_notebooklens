@@ -35,6 +35,8 @@ docker build -t notebooklens-local .
 git diff --check
 ```
 
+The published documentation site is deployed from `main` through the `Docs Pages` workflow and serves the MkDocs build from `mkdocs.yml`.
+
 ## Repository Layout
 
 - `src/diff_engine.py` implements notebook parsing, alignment, and change classification.
