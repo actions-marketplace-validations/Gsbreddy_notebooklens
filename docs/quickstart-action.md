@@ -56,7 +56,8 @@ jobs:
 
 `GITHUB_TOKEN` is the built-in GitHub Actions token. NotebookLens uses it to read changed notebook metadata and create or update the sticky review comment.
 
-You can also start from the checked-in example at [`.github/notebooklens-pr.example.yml`](../.github/notebooklens-pr.example.yml).
+You can also start from the checked-in workflow example in the repo:
+[`/.github/notebooklens-pr.example.yml`](https://github.com/Gsbreddy/notebooklens/blob/main/.github/notebooklens-pr.example.yml).
 
 ## 2. Open or update a pull request
 
@@ -83,9 +84,12 @@ If notebook changes disappear from later pushes, NotebookLens deletes its own ma
 
 After the baseline `none` mode flow is useful, you can add optional capabilities:
 
-- Enable Claude with [README.md#enable-claude-optional](../README.md#enable-claude-optional)
-- Add repo-specific reviewer prompts with [README.md#reviewer-guidance-playbooks](../README.md#reviewer-guidance-playbooks)
-- Inspect the exact comment format in [README.md#pr-comment-format](../README.md#pr-comment-format)
+- Enable Claude with the repo README section:
+  [Enable Claude (optional)](https://github.com/Gsbreddy/notebooklens/blob/main/README.md#enable-claude-optional)
+- Add repo-specific reviewer prompts with the README playbooks section:
+  [Reviewer Guidance Playbooks](https://github.com/Gsbreddy/notebooklens/blob/main/README.md#reviewer-guidance-playbooks)
+- Inspect the exact comment format in the README:
+  [PR Comment Format](https://github.com/Gsbreddy/notebooklens/blob/main/README.md#pr-comment-format)
 
 ## Privacy and limits
 
@@ -94,9 +98,7 @@ Key defaults for the Action path:
 - `none` mode makes no external AI calls
 - `claude` mode sends redacted review payloads to Anthropic
 - NotebookLens never checks out the repository during the Action run
-- Hard limits and deterministic behavior are documented in:
-  - [privacy.md](privacy.md)
-  - [README.md#hard-limits](../README.md#hard-limits)
+- Hard limits and deterministic behavior are documented in [privacy.md](privacy.md).
 
 ## Troubleshooting
 

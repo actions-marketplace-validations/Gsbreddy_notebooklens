@@ -1,0 +1,23 @@
+site_name: NotebookLens
+site_description: Notebook-aware pull request review for Jupyter notebooks on GitHub
+repo_url: https://github.com/Gsbreddy/notebooklens
+edit_uri: edit/main/docs/
+docs_dir: docs
+strict: true
+
+nav:
+  - Home: index.md
+  - Quick Start:
+      - OSS Action: quickstart-action.md
+      - Hosted Workspace Beta: quickstart-workspace.md
+  - Trust:
+      - Privacy and Data Flow: privacy.md
+      - Troubleshooting: troubleshooting.md
+      - Examples: examples.md
+  - Operators:
+      - Self-Hosting: self-hosting.md
+      - LiteLLM Admin Settings: admin-ai-settings.md
+      - GitHub PR Sync: github-pr-sync.md
+
+theme:
+  name: mkdocs

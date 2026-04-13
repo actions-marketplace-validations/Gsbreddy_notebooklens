@@ -9,6 +9,7 @@ __pycache__/
 build/
 dist/
 htmlcov/
+site/
 node_modules/
 .next/
 coverage/

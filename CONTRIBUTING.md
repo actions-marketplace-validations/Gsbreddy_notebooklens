@@ -28,7 +28,7 @@ python -m pip install -e ".[dev]"
 Run the full local validation suite before opening a pull request:
 
 ```bash
-python scripts/validate_docs.py
+python -m mkdocs build --strict
 pytest
 python3 -m py_compile src/*.py
 docker build -t notebooklens-local .
